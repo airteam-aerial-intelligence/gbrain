@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 306620,
-    "stdoutSha256": "366f79cdfc24b844babc3b6e673caf5dd8913bf39c998f35c17044372861a8b6",
+    "stdoutBytes": 307054,
+    "stdoutSha256": "1a2d66161ee3de87382392c7d8af34da8694821870f8124d1bf7fd2794a7c690",
     "toolNames": [
       "remember",
       "entity",
@@ -4414,7 +4414,7 @@
         "scope": "admin"
       },
       {
-        "description": "List files stored in the brain's file storage, optionally for one page. Use when finding attachments before file_get or file_url. Needs admin scope.",
+        "description": "List files stored in the brain's file storage, optionally for one page. Use when finding attachments before file_get or file_url. Needs files (or admin) scope.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -4433,7 +4433,7 @@
           "required": [],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
         "description": "Upload a local file into brain storage and attach it to a page. Use when a page needs its source document or image. Needs admin scope and the local stdio server; agent callers may only upload files under the server's working directory.",
@@ -4465,7 +4465,7 @@
         "scope": "admin"
       },
       {
-        "description": "Return a URL for a stored file: on S3-compatible and Supabase storage a signed download link valid for one hour. Use when a user needs to open or download an attachment listed by file_list. Needs admin scope. On storage_error: list the files again with file_list.",
+        "description": "Return a URL for a stored file: on S3-compatible and Supabase storage a signed download link valid for one hour. Use when a user needs to open or download an attachment listed by file_list. Needs files (or admin) scope. On storage_error: list the files again with file_list.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -4477,6 +4477,7 @@
         "schema": {
           "properties": {
             "storage_path": {
+              "description": "Stored path of the file, as file_list lists it",
               "type": "string"
             }
           },
@@ -4485,7 +4486,7 @@
           ],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
         "description": "Record the files row for an object the host already stored at the path file_upload would use (<page_slug>/<filename>, or unsorted/<first 8 hash chars>-<filename>), after reading it back and matching its size and SHA-256. Use when an embedded host writes bytes to storage itself. Runs only on an engine opened from settings; registering the same path again updates its row.",
@@ -4564,7 +4565,7 @@
         "scope": "admin"
       },
       {
-        "description": "Start uploading a file (image, PDF, any binary) into the brain's file storage from anywhere, remote callers included. Answers mode \"direct\" with a short-lived URL: send the raw file bytes as the body of an HTTP PUT to it with exactly the returned headers, or mode \"parts\": send the bytes base64-encoded with file_upload_part in parts of at most part_max_bytes. Then call file_upload_commit. With import: true an image also becomes a searchable image page (visual embedding + OCR). Needs admin scope.",
+        "description": "Start uploading a file (image, PDF, any binary) into the brain's file storage from anywhere, remote callers included. Answers mode \"direct\" with a short-lived URL: send the raw file bytes as the body of an HTTP PUT to it with exactly the returned headers, or mode \"parts\": send the bytes base64-encoded with file_upload_part in parts of at most part_max_bytes. Then call file_upload_commit. With import: true an image also becomes a searchable image page (visual embedding + OCR). Needs files (or admin) scope.",
         "idempotent": false,
         "local_only": false,
         "mutating": true,
@@ -4621,10 +4622,10 @@
           ],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
-        "description": "Send one part of an upload begun with file_upload_begin in mode \"parts\": the base64 of bytes [(part-1)*part_max_bytes, part*part_max_bytes). Resending a part replaces it. Needs admin scope.",
+        "description": "Send one part of an upload begun with file_upload_begin in mode \"parts\": the base64 of bytes [(part-1)*part_max_bytes, part*part_max_bytes). Resending a part replaces it. Needs files (or admin) scope.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -4646,6 +4647,7 @@
               "type": "integer"
             },
             "upload_id": {
+              "description": "The upload_id file_upload_begin returned",
               "type": "string"
             }
           },
@@ -4656,10 +4658,10 @@
           ],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
-        "description": "Finish an upload begun with file_upload_begin: checks the received bytes against the declared size and SHA-256, stores the file (<page_slug>/<filename>, or unsorted/<hash>-<filename>) and records it, and with import: true turns an image into a searchable image page. A failed import never loses the stored file. Needs admin scope.",
+        "description": "Finish an upload begun with file_upload_begin: checks the received bytes against the declared size and SHA-256, stores the file (<page_slug>/<filename>, or unsorted/<hash>-<filename>) and records it, and with import: true turns an image into a searchable image page. A failed import never loses the stored file. Needs files (or admin) scope.",
         "idempotent": false,
         "local_only": false,
         "mutating": true,
@@ -4671,6 +4673,7 @@
         "schema": {
           "properties": {
             "upload_id": {
+              "description": "The upload_id file_upload_begin returned",
               "type": "string"
             }
           },
@@ -4679,10 +4682,10 @@
           ],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
-        "description": "Drop a pending upload begun with file_upload_begin and every byte staged for it. Needs admin scope.",
+        "description": "Drop a pending upload begun with file_upload_begin and every byte staged for it. Needs files (or admin) scope.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -4694,6 +4697,7 @@
         "schema": {
           "properties": {
             "upload_id": {
+              "description": "The upload_id file_upload_begin returned",
               "type": "string"
             }
           },
@@ -4702,10 +4706,10 @@
           ],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
-        "description": "Return a stored file's bytes: png/jpeg/gif/webp images as an image you can see, any other file as data_base64. Files larger than this connection's result cap are refused (result_too_large); use file_url for a download link instead. Find storage_path with file_list. Needs admin scope.",
+        "description": "Return a stored file's bytes: png/jpeg/gif/webp images as an image you can see, any other file as data_base64. Files larger than this connection's result cap are refused (result_too_large); use file_url for a download link instead. Find storage_path with file_list. Needs files (or admin) scope.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -4717,6 +4721,7 @@
         "schema": {
           "properties": {
             "storage_path": {
+              "description": "Stored path of the file, as file_list lists it",
               "type": "string"
             }
           },
@@ -4725,7 +4730,7 @@
           ],
           "type": "object"
         },
-        "scope": "admin"
+        "scope": "files"
       },
       {
         "description": "Find archived items on the storage shelf (files moved to B2, Supabase Storage, S3 and similar) by a plain phrase, such as \"the October Gmail dataset\". Ranks exact id, then exact alias, then cards matching most of the phrase's words in title, aliases and description. When nothing matches, not_found is true and closest lists the nearest cards. Then call storage_get with the id for where it is stored and how to restore it.",
