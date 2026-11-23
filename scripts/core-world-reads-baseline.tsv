@@ -1179,6 +1179,7 @@ src/core/sync.ts	process_env	1	W6: settings plane out of the core
 src/core/tailscale.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/tailscale.ts	process_env	2	W6: settings plane out of the core
 src/core/tailscale.ts	spawn_import	1	W7: process-wide effects move to src/cli
+src/core/take-proposal-schema.ts	module_collection	1	per-engine memo that the review columns exist (fork-only idempotent DDL; upstream carries a migration)
 src/core/takes-quality-eval/receipt-write.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/takes-quality-eval/replay.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/takes-write.ts	fs_import	1	W7: filesystem boundary moves to the local app
