@@ -86,7 +86,7 @@ Every non-localOnly operation on the MCP surface: 187 tools across 29 areas. **S
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
 | `get_brain_identity` | Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. | read |  |  |
-| `whoami` | Your identity: transport, scopes and, over OAuth, client, source_id and federated_read. | read | yes |  |
+| `whoami` | Your identity: transport, scopes and, over OAuth, client, source_id and federated_read; end_user when the request declared one (X-Gbrain-End-User). | read | yes |  |
 
 ## ingest
 
