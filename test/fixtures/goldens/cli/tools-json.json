@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 307054,
-    "stdoutSha256": "1a2d66161ee3de87382392c7d8af34da8694821870f8124d1bf7fd2794a7c690",
+    "stdoutBytes": 307114,
+    "stdoutSha256": "b08029a392d4c7c6b6baa91adefe23346ddcd2b6bf60592ddb54978743486cde",
     "toolNames": [
       "remember",
       "entity",
@@ -6388,7 +6388,7 @@
         "scope": "write"
       },
       {
-        "description": "Your identity: transport, scopes and, over OAuth, client, source_id and federated_read.",
+        "description": "Your identity: transport, scopes and, over OAuth, client, source_id and federated_read; end_user when the request declared one (X-Gbrain-End-User).",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
