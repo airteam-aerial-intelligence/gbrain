@@ -144,7 +144,8 @@ export async function findWriteSecretInParts(parts: AsyncIterable<Uint8Array | n
 /** Whether the guard is on: GBRAIN_SECRETS_ON_WRITE=refuse, or `secrets.on_write` set to `refuse` in the brain's config. */
 export async function writeSecretGuardOn(engine: { getConfig(key: string): Promise<string | null> }): Promise<boolean> {
   if (process.env[SECRETS_ON_WRITE_ENV] === 'refuse') return true;
-  try { return (await engine.getConfig(SECRETS_ON_WRITE_KEY))?.trim() === 'refuse'; } catch { return false; }
+  // A failed config read fails the write (it is not read as "guard off").
+  return (await engine.getConfig(SECRETS_ON_WRITE_KEY))?.trim() === 'refuse';
 }
 
 /** The refusal: names the pattern type and what to do, never the matched text. */
