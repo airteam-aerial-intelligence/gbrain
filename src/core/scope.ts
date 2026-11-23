@@ -22,7 +22,7 @@
  * vs user-account-mgmt — neither implies the other).
  */
 
-export type Scope = 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent' | 'skill_editor' | 'skill_publisher' | 'skills_member_self' | 'memory_confirm' | 'files';
+export type Scope = 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent' | 'skill_editor' | 'skill_publisher' | 'skills_member_self' | 'memory_confirm' | 'files' | 'declare_end_user';
 
 export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
   'read',
@@ -36,6 +36,7 @@ export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
   'skills_member_self',
   'memory_confirm',
   'files',
+  'declare_end_user',
 ]);
 
 /**
@@ -45,6 +46,7 @@ export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
 export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
   'admin',
   'agent',
+  'declare_end_user',
   'files',
   'memory_confirm',
   'read',
@@ -175,6 +177,9 @@ const IMPLIES: Record<Scope, ReadonlySet<Scope>> = {
   // Remote file transfer (ops/file-transfer.ts, file_list, file_url): moving file bytes in and out of storage, without
   // the rest of admin. Implied by admin, so admin clients keep the file ops they had.
   files: new Set(['files']),
+  // A trusted service may name the person a request's writes are for (X-Gbrain-End-User, persistence/attribution.ts).
+  // Attribution only, never access. A sibling: admin does not imply it, so only a credential granted it may declare.
+  declare_end_user: new Set(['declare_end_user']),
 };
 
 /**
