@@ -8,7 +8,9 @@
  * takes-holder allow-list and whose page they may read; any other id presents as not_found. Accept promotes through
  * the same coordinated takes_add mutation as the CLI, run AS the caller, so the holder write fence applies and the
  * page version records the caller's agent label and declared end user. acted_by records the end user a trusted
- * gateway declared (else the agent label, else `mcp:<client>`); acted_via records `mcp:<client>`.
+ * gateway declared (else the agent label, else `mcp:<client>`); acted_via records `mcp:<client>` (a trusted local
+ * surface such as the Slack sink: its agent label, `slack:<sink>`). Decisions emit take_proposal.accepted / .rejected
+ * to the configured notification sinks (notifications/emit.ts), so a posted Slack message shows them.
  *
  * Retry-safe: repeating a decision that already took effect returns the recorded outcome with
  * `already_decided: true`; the opposite decision on a decided row is refused (`proposal_already_decided`).
@@ -62,7 +64,8 @@ async function visibleProposal(ctx: OperationContext, id: number, op: string): P
 async function reviewer(ctx: OperationContext): Promise<{ actedBy: string; actedVia: string }> {
   if (ctx.remote === false) {
     const owner = resolveOwnerHolder({ configValue: await ctx.engine.getConfig('emotional_weight.user_holder') });
-    return { actedBy: ctx.endUser ?? owner, actedVia: 'cli' };
+    // A trusted host-side surface (the Slack sink) names itself in agentLabel (`slack:<sink>`) and the person in endUser.
+    return { actedBy: ctx.endUser ?? owner, actedVia: ctx.agentLabel ?? 'cli' };
   }
   const client = ctx.auth?.clientName ?? ctx.auth?.clientId ?? ctx.transport ?? 'stdio';
   return { actedBy: ctx.endUser ?? ctx.agentLabel ?? `mcp:${client}`, actedVia: `mcp:${client}` };
