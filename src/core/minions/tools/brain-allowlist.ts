@@ -45,6 +45,7 @@ import { currentSubmissionAuthority } from '../submission-authority.ts';
 import { allowedOpNames } from '../../../mcp/surface.ts';
 import { paramNotOnSurface } from '../../../mcp/hidden-tool-hint.ts';
 import { opError } from '../../ops/contract.ts';
+import { confineRemoteCallerTool } from '../remote-caller-tool.ts';
 
 // The allow-list itself lives in a handler-free module so the MCP surface
 // tiers (src/mcp/surface.ts) can read it without this module's operations import.
@@ -314,9 +315,13 @@ function brainTool(op: Operation, opts: BuildBrainToolsOpts): ToolDef {
       const params = normalizeOptionalParams(op, raw);
       const submitted = currentSubmissionAuthority();
       const agent = submitted?.kind === 'remote_agent' ? submitted : undefined;
+      // The job's writes are attributed to the end user its submitting call declared, as that call's own writes were.
+      if (agent?.grant.endUser) opCtx.endUser = agent.grant.endUser;
+      // Airteam fork: a remote_caller job's tool call runs as the submitting credential (scope, operations, sources, holders).
+      const caller = submitted?.kind === 'remote_caller' ? confineRemoteCallerTool(submitted, op, opCtx) : undefined;
       // #9669: a remote agent job calls tools as the connection that submitted it: a tool or parameter its surface
       // leaves out is refused exactly as MCP dispatch refuses it, before validation and the handler.
-      const surface = agent?.grant.surface ?? 'full';
+      const surface = agent?.grant.surface ?? caller?.grant.surface ?? 'full';
       if (surface !== 'full' && !allowedOpNames(operations, surface).has(op.name)) {
         throw opError('unknown_tool', `${op.name} is not on the ${surface} tool surface of the connection that submitted this job; nothing ran.`,
           'Use a tool this job lists. Only the brain operator can widen the submitting client\'s surface.');

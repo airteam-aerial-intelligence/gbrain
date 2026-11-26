@@ -1,8 +1,9 @@
 /**
  * Usage accounting op cluster (#4218, revives the #3392 shape).
  *
- * `get_usage` reads the chat_usage_log ledger (migration v140) that
- * gateway.chat() fills at its success boundary via the chat-usage sink.
+ * `get_usage` reads the chat_usage_log ledger (migration v140; attribution
+ * columns added by the idempotent schema bootstrap, no numbered migration) that the usage observer fills with one row per provider call
+ * (chat, expansion, embedding, rerank, multimodal, subagent; any outcome).
  * Aggregates only — no raw rows — so the surface exposes spend/volume, never
  * content. The `coverage` block is the honesty contract: it states exactly
  * what the ledger does and does not capture so a consumer can't mistake a
@@ -33,7 +34,7 @@ const get_usage: Operation = {
   idempotent: true,
   outputRedaction: 'no_stored_text',
   description:
-    'Aggregate chat usage + cost from the chat_usage_log ledger (per-model and per-phase token counts, cache reads/writes, USD estimates) with explicit coverage fields.',
+    'Aggregate usage + cost of all provider calls (chat, expansion, embedding, rerank, subagent) from the chat_usage_log ledger (per-model, per-phase and per-kind token counts, cache reads/writes, USD estimates) with explicit coverage fields.',
   params: {
     days: { type: 'number', description: 'Window in days (default 30, max 365).' },
   },
@@ -50,6 +51,7 @@ const get_usage: Operation = {
     let rows: UsageRow[] = [];
     let loggedSince: string | null = null;
     let tableMissing = false;
+    let byKind: Array<{ kind: string; calls: number; cost_usd: number | null }> = [];
     try {
       rows = await ctx.engine.executeRaw<UsageRow>(
         `SELECT model,
@@ -72,6 +74,15 @@ const get_usage: Operation = {
         [],
       );
       loggedSince = since[0]?.since ?? null;
+      try {
+        byKind = await ctx.engine.executeRaw<{ kind: string; calls: number; cost_usd: number | null }>(
+          `SELECT coalesce(kind, 'chat') AS kind, count(*)::int AS calls, sum(cost_usd)::float8 AS cost_usd
+           FROM chat_usage_log
+           WHERE created_at >= now() - make_interval(days => $1)
+           GROUP BY 1 ORDER BY 3 DESC NULLS LAST`,
+          [days],
+        );
+      } catch { /* bootstrap has not added the kind column yet */ }
     } catch {
       // Pre-v136 brain (table absent). Report empty with coverage saying so
       // rather than erroring — the op is a read surface, not a migration gate.
@@ -145,21 +156,22 @@ const get_usage: Operation = {
       totals: { ...totals, cost_usd: Math.round(totals.cost_usd * 1e6) / 1e6 },
       by_model: [...byModel.values()].sort((a, b) => (b.cost_usd ?? 0) - (a.cost_usd ?? 0)),
       by_phase: [...byPhase.values()].sort((a, b) => b.cost_usd - a.cost_usd),
+      /** Rows written before the attribution columns existed carry no kind; they were chat calls. */
+      by_kind: byKind.map(k => ({ kind: k.kind, calls: n(k.calls), cost_usd: k.cost_usd == null ? null : n(k.cost_usd) })),
       // Explicit coverage fields (#4218): state what the ledger captures so a
       // consumer never mistakes a partial ledger for total spend.
       coverage: {
-        source: 'gateway.chat',
-        /** Earliest ledger row; calls before this (or pre-v136) are invisible. */
+        source: 'all provider calls',
+        /** Earliest ledger row; calls before this (or pre-v140) are invisible. */
         logged_since: loggedSince,
         table_present: !tableMissing,
         priced_calls: totals.calls - unpricedCalls,
-        /** Calls whose model had no CANONICAL_PRICING entry — tokens counted, dollars unknown. */
+        /** Calls with no price (unknown model, or a failed call with no reported usage) — tokens counted, dollars unknown. */
         unpriced_calls: unpricedCalls,
         not_covered: [
-          'failed chat calls (budget-tracker owns pessimistic in-flight spend)',
-          'subagent raw-SDK calls',
-          'embeddings (embedding-pricing.ts unit)',
-          'calls made before migration v140 / sink registration',
+          'calls made before migration v140 / sink registration, or by a process with no engine',
+          'calls refused by admission before reaching the provider',
+          'attribution columns (kind, job, op, caller, CLI command) on rows written before the schema bootstrap added them',
         ],
       },
     };

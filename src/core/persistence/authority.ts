@@ -79,7 +79,7 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
     ...(access?.actor && ctx.attestedOp ? { attestedOp: ctx.attestedOp } : {}),
     ...(perCallWriteSource(ctx, sourceId, slug) ? { attestedSource: sourceId } : {}),
     autoLinkTrusted: ctx.remote === false || ctx.viaSubagent === true && !ctx.auth && !!ctx.allowedSlugPrefixes?.length,
-    takesHolders: ctx.remote === false ? null : [...(ctx.takesHoldersAllowList ?? ['world'])],
+    takesHolders: writeHolders(ctx),
     scopes: [...(ctx.auth?.scopes ?? localGrant?.scopes ?? [])],
     operations: ctx.auth?.allowedOperations ? [...ctx.auth.allowedOperations] : localGrant?.operations ?? null,
     slugPrefixes: ctx.auth?.boundSlugPrefixes ? [...ctx.auth.boundSlugPrefixes] : localGrant?.slugPrefixes ?? null,
@@ -119,6 +119,11 @@ function sourceMembership(engine: SqlEngine, sourceId: string, lock: boolean) {
  * transaction (each source's membership, each local writer), as calls a
  * caller pipelines; the rows' own checks then answer them from the memo.
  */
+/** Take holders a caller may WRITE: none for trusted local callers (null = any); a remote caller's stored list, else the fail-closed ['world']. */
+export function writeHolders(ctx: Pick<OperationContext, 'remote' | 'takesHoldersAllowList'>): string[] | null {
+  return ctx.remote === false ? null : [...(ctx.takesHoldersAllowList ?? ['world'])];
+}
+
 export function storedAuthorizationReads(engine: SqlEngine, rows: readonly WriteRequest[], lock = false): Array<() => Promise<unknown>> {
   const sources = [...new Set(rows.map(row => row.source_id))];
   const writers = [...new Set(rows.flatMap(row => ['local_cli', 'local_stdio'].includes(row.authority?.principal?.kind) ? [row.authority.principal.id] : []))];

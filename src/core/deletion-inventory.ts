@@ -54,7 +54,7 @@ const ROWS: readonly Row[] = [
   ['budget_ledger', 'out_of_scope', 'no_memory_text', 'scope resolver_id'],
   ['budget_reservations', 'out_of_scope', 'no_memory_text', 'reservation_id scope resolver_id status'],
   ['calibration_profiles', 'out_of_scope', 'probed_reported', 'source_id holder wave_version domain_scorecards pattern_statements active_bias_tags model_id', 'pattern_statements domain_scorecards'],
-  ['chat_usage_log', 'out_of_scope', 'no_memory_text', 'model provider phase'],
+  ['chat_usage_log', 'out_of_scope', 'no_memory_text', 'model provider phase kind operation job_name op caller cli_command outcome'],
   ['chronicle_judge_reservations', 'out_of_scope', 'no_memory_text', 'source_id content_hash'],
   ['chronicle_page_state', 'out_of_scope', 'no_memory_text', 'source_id content_hash slug state reason trigger principal_kind principal_id event_slugs event_hashes campaign_id pricing_policy judge_input_hash judge_window_hash'],
   ['code_edges_chunk', 'out_of_scope', 'no_memory_text', 'from_symbol_qualified to_symbol_qualified edge_type edge_metadata source_id'],

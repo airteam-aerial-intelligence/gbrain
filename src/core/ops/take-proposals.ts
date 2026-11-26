@@ -20,6 +20,7 @@ import { opError, type Operation, type OperationContext } from './contract.ts';
 import { readHolders, sourceScopeOpts, enforceClientSlugFence } from './context.ts';
 import { resolveExcludePrivatePages, privatePagesFilterForCaller } from '../search/private-visibility.ts';
 import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
+import { writeHolders } from '../persistence/authority.ts';
 import { resolveOwnerHolder } from '../owner-holder.ts';
 import {
   acceptProposal, getProposal, listProposals, rejectProposal,
@@ -216,7 +217,7 @@ const takes_proposal_accept: Operation = {
     if (row.status !== 'pending' && row.status !== 'accepted') alreadyDecided('takes_proposal_accept', row);
     enforceClientSlugFence(ctx, row.page_slug, 'takes_proposal_accept');
     const holder = edits.holder ?? row.holder;
-    const holders = ctx.remote === false ? undefined : (ctx.takesHoldersAllowList ?? ['world']);
+    const holders = writeHolders(ctx);
     if (holders && !holders.includes(holder)) {
       throw opError('permission_denied', `takes_proposal_accept: holder '${holder}' is not in this connection's takes-holder allow-list.`,
         "Ask the brain host's operator to grant this holder to the connection, or accept with a holder the connection may write.");

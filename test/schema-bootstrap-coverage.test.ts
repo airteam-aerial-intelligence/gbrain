@@ -247,6 +247,9 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // v302 (GST-2228): the blob's unique link_transitions_identity_idx includes
   // link_source, which only v302 adds to a brain at v204-v301.
   { kind: 'column', table: 'link_transitions', column: 'link_source' },
+  // chat_usage_log attribution (no numbered migration): the blob's partial
+  // idx_chat_usage_log_job references job_id, which only the bootstrap adds.
+  { kind: 'column', table: 'chat_usage_log', column: 'job_id' },
 ];
 
 test('applyForwardReferenceBootstrap covers every forward reference declared in REQUIRED_BOOTSTRAP_COVERAGE', async () => {
@@ -381,6 +384,10 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE link_transitions DROP COLUMN IF EXISTS link_source;
       CREATE UNIQUE INDEX IF NOT EXISTS link_transitions_identity_idx
         ON link_transitions (origin_page_id, from_page_id, to_page_id, link_type, kind, occurred_on, producer) NULLS NOT DISTINCT;
+
+      -- attribution strip: an older chat_usage_log has no job_id or its index.
+      DROP INDEX IF EXISTS idx_chat_usage_log_job;
+      ALTER TABLE chat_usage_log DROP COLUMN IF EXISTS job_id;
     `);
 
     // Note: we don't strip sources.archived* here because they're inline in the
@@ -500,6 +507,10 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
       ALTER TABLE link_transitions DROP COLUMN IF EXISTS link_source;
       CREATE UNIQUE INDEX IF NOT EXISTS link_transitions_identity_idx
         ON link_transitions (origin_page_id, from_page_id, to_page_id, link_type, kind, occurred_on, producer) NULLS NOT DISTINCT;
+
+      -- attribution strip: an older chat_usage_log has no job_id or its index.
+      DROP INDEX IF EXISTS idx_chat_usage_log_job;
+      ALTER TABLE chat_usage_log DROP COLUMN IF EXISTS job_id;
 
       -- WP4 (v127) strip: surface columns + the wedge-signal index; replay
       -- must succeed from the pre-v127 shape.

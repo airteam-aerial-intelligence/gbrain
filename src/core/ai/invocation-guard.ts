@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertModelAllowed, DeniedModelError } from './model-deny.ts';
 
 export interface AIInvocation {
   operation: string;
@@ -59,6 +60,14 @@ export interface AIAttribution {
   job_id?: number | string;
   job_name?: string;
   phase?: string;
+  /** MCP/HTTP operation name (e.g. `query`). */
+  op?: string;
+  /** Who asked: MCP client name, plus `/<end user>` when known. */
+  caller?: string;
+  /** How the request arrived: `cli`, `stdio`, `http`, ... */
+  transport?: string;
+  /** Top-level CLI command name only (never its arguments). */
+  cli_command?: string;
 }
 const attributions = new AsyncLocalStorage<AIAttribution>();
 
@@ -80,6 +89,8 @@ export interface AIInvocationEvent {
   startedAt: number;
   ms: number;
   attribution: AIAttribution | null;
+  /** Constructor name of the thrown error (never its message), or `http_<status>` when a fetch-based call resolved with a non-ok Response. Unset on success. */
+  errorClass?: string;
 }
 export type AIInvocationObserver = (event: AIInvocationEvent) => void;
 const observers = new Set<AIInvocationObserver>();
@@ -116,23 +127,51 @@ function notifyObservers(event: AIInvocationEvent): void {
 export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>,
   rejected?: (error: unknown) => AIInvocationUsage | null): Promise<T> {
   const meter = meters.getStore();
-  if (observers.size === 0 && !meter) return admitAndRun(call, run, usage, rejected);
+  // Airteam fork: banned models never reach a provider, guarded or not. When
+  // observed, the denial is checked inside the try so it surfaces as a
+  // `refused` event (logged with its error class, never recorded or metered).
+  if (observers.size === 0 && !meter) { assertModelAllowed(call.model, call.operation); return admitAndRun(call, run, usage, rejected); }
   const startedAt = Date.now();
   let outcome: AIInvocationEvent['outcome'] = 'error';
   let measured: AIInvocationUsage | null = null;
+  let errorClass: string | undefined;
   try {
+    assertModelAllowed(call.model, call.operation);
     const result = await admitAndRun(call, run, usage, rejected);
-    outcome = 'ok';
+    // A fetch-based call resolves with the Response even on HTTP 429/5xx: the
+    // caller throws or degrades afterwards, so observe that as an error here
+    // without changing what the call returns.
+    const failedStatus = failedHttpStatusOf(result);
+    if (failedStatus === null) outcome = 'ok';
+    else errorClass = `http_${failedStatus}`;
     try { measured = await usage(result); } catch { measured = null; }
     return result;
   } catch (error) {
-    if (isAIInvocationPolicyError(error)) outcome = 'refused';
+    if (isAIInvocationPolicyError(error) || error instanceof DeniedModelError) outcome = 'refused';
+    errorClass = errorClassOf(error);
     throw error;
   } finally {
     const event: AIInvocationEvent = { call, outcome, usage: measured, startedAt, ms: Date.now() - startedAt, attribution: currentAIAttribution() };
+    if (errorClass !== undefined) event.errorClass = errorClass;
     notifyObservers(event);
     if (meter) { try { meter(event); } catch { observerFailures += 1; } }
   }
+}
+
+/** Status of a fetch Response-like result that is not ok (`ok === false`), else null. Never throws. */
+function failedHttpStatusOf(result: unknown): number | null {
+  try {
+    if (typeof result !== 'object' || result === null) return null;
+    const r = result as { ok?: unknown; status?: unknown };
+    return r.ok === false && typeof r.status === 'number' ? r.status : null;
+  } catch { return null; }
+}
+
+function errorClassOf(error: unknown): string {
+  try {
+    const name = (error as { constructor?: { name?: unknown } } | null)?.constructor?.name;
+    return typeof name === 'string' && name ? name : typeof error;
+  } catch { return typeof error; }
 }
 
 async function admitAndRun<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>,
