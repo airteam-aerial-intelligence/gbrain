@@ -5,7 +5,9 @@
  * in a query string or a body). The notification sink (notifications/sinks/slack.ts)
  * also posts and edits messages (`chat.postMessage`, `chat.update`,
  * `chat.postEphemeral`, JSON POSTs) and resolves a clicker (`users.info`,
- * `conversations.members`). Slack answers application errors inside
+ * `conversations.members`). The initiatives side lists, joins and leaves
+ * channels (`conversations.list/join/leave`), reacts (`reactions.add`) and
+ * links messages (`chat.getPermalink`). Slack answers application errors inside
  * HTTP 200 bodies (`ok: false`); `classifySlackBody` turns them into the
  * connector client's typed errors. Requests are spaced for Slack's Tier 3
  * limits (about 50 a minute), and a 429 waits for its Retry-After.
@@ -109,10 +111,57 @@ export interface SlackApi {
   userInfo(user: string, signal?: AbortSignal): Promise<SlackUserIdentity>;
   /** Whether `user` is a member of `channel` (conversations.members: channels:read, groups:read for private). */
   isChannelMember(channel: string, user: string, signal?: AbortSignal): Promise<boolean>;
+  /** reactions.add (reactions:write): `name` without colons. A reaction already there is success. */
+  reactionsAdd(channel: string, ts: string, name: string, signal?: AbortSignal): Promise<void>;
+  /** conversations.join (channels:join): public channels only. */
+  joinChannel(channel: string, signal?: AbortSignal): Promise<void>;
+  /** conversations.leave: leaving a channel the app is not in is success. */
+  leaveChannel(channel: string, signal?: AbortSignal): Promise<void>;
+  /** conversations.list (channels:read, groups:read): every non-archived public and private channel the app can see. */
+  listChannels(signal?: AbortSignal): Promise<SlackChannelListing[]>;
+  /** chat.getPermalink: the message's permalink. */
+  permalink(channel: string, ts: string, signal?: AbortSignal): Promise<string>;
 }
 
-/** An outbound message: plain `text` is the notification fallback; `blocks` is Block Kit. */
-export interface SlackOutboundMessage { channel: string; text: string; blocks?: unknown[] }
+/** An outbound message: plain `text` is the notification fallback; `blocks` is Block Kit; `thread_ts` posts it as a thread reply. */
+export interface SlackOutboundMessage { channel: string; text: string; blocks?: unknown[]; thread_ts?: string }
+
+/** One conversations.list entry. */
+export interface SlackChannelListing { id: string; name: string; is_private: boolean; is_member: boolean }
+
+/** A channel reference that names no channel the app can see. */
+export class SlackChannelNotFoundError extends Error {
+  readonly code = 'slack_channel_not_found';
+  constructor(readonly ref: string) {
+    super(`slack: no channel ${ref} is visible to the app; check the name or id, and for a private channel invite the app with /invite @<your app>`);
+    this.name = 'SlackChannelNotFoundError';
+  }
+}
+
+/**
+ * A channel id (C…/G…) or name (with or without '#') to its id, name and whether the app is a member.
+ * Throws SlackChannelNotFoundError (code `slack_channel_not_found`) when the app cannot see it.
+ */
+export async function resolveSlackChannel(api: Pick<SlackApi, 'conversationInfo' | 'listChannels'>, ref: string, signal?: AbortSignal):
+  Promise<{ id: string; name: string; isMember: boolean }> {
+  const raw = ref.trim();
+  const id = raw.toUpperCase();
+  if (/^[CG][A-Z0-9]{6,20}$/.test(raw)) {
+    try {
+      const info = await api.conversationInfo(id, signal);
+      return { id: info.id, name: info.name, isMember: true };
+    } catch (error) {
+      if (!(error instanceof SlackChannelUnavailableError)) throw error;
+      if (error.slackError !== 'not_in_channel') throw new SlackChannelNotFoundError(raw);
+      const listed = (await api.listChannels(signal)).find(c => c.id === id);
+      return { id, name: listed?.name ?? id, isMember: false };
+    }
+  }
+  const name = raw.replace(/^#/, '').trim().toLowerCase();
+  const listed = name ? (await api.listChannels(signal)).find(c => c.name.toLowerCase() === name) : undefined;
+  if (!listed) throw new SlackChannelNotFoundError(raw);
+  return { id: listed.id, name: listed.name, isMember: listed.is_member };
+}
 
 export interface SlackUserIdentity { id: string; email: string | null; name: string; deleted: boolean; bot: boolean }
 
@@ -147,6 +196,13 @@ export function slackApi(opts: SlackClientOpts): SlackApi {
     }
     throw new SlackApiError(method, `more than ${MAX_PAGES} pages`);
   }
+  /** A JSON POST naming a channel: a channel error carries the channel id (a POST has none in its URL). */
+  async function channelPost(method: string, channel: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
+    try { await client.postJSON(`/api/${method}`, body, { signal }); } catch (error) {
+      if (error instanceof SlackChannelUnavailableError && error.channelId === 'unknown') throw new SlackChannelUnavailableError(channel, error.slackError);
+      throw error;
+    }
+  }
   return {
     async authTest(signal) {
       const body = await get<{ team_id?: unknown; team?: unknown; user_id?: unknown; enterprise_id?: unknown }>('auth.test', {}, signal);
@@ -180,7 +236,8 @@ export function slackApi(opts: SlackClientOpts): SlackApi {
     },
     async postMessage(message, signal) {
       const body = await client.postJSON<{ channel?: unknown; ts?: unknown }>('/api/chat.postMessage',
-        { channel: message.channel, text: message.text, ...(message.blocks ? { blocks: message.blocks } : {}), unfurl_links: false, unfurl_media: false }, { signal });
+        { channel: message.channel, text: message.text, ...(message.blocks ? { blocks: message.blocks } : {}), ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
+          unfurl_links: false, unfurl_media: false }, { signal });
       const channel = str(body.channel);
       const ts = str(body.ts);
       if (!channel || !ts) throw new SlackShapeDriftError('chat.postMessage.ts');
@@ -204,6 +261,38 @@ export function slackApi(opts: SlackClientOpts): SlackApi {
     async isChannelMember(channel, user, signal) {
       const members = await paged<string>('conversations.members', { channel }, 'members', signal);
       return members.includes(user);
+    },
+    async reactionsAdd(channel, ts, name, signal) {
+      try { await channelPost('reactions.add', channel, { channel, timestamp: ts, name }, signal); } catch (error) {
+        if (error instanceof SlackApiError && error.slackError === 'already_reacted') return;
+        throw error;
+      }
+    },
+    async joinChannel(channel, signal) {
+      await channelPost('conversations.join', channel, { channel }, signal);
+    },
+    async leaveChannel(channel, signal) {
+      try { await channelPost('conversations.leave', channel, { channel }, signal); } catch (error) {
+        if (error instanceof SlackChannelUnavailableError && error.slackError === 'not_in_channel') return;
+        throw error;
+      }
+    },
+    async listChannels(signal) {
+      const channels = await paged<Record<string, unknown>>('conversations.list',
+        { types: 'public_channel,private_channel', exclude_archived: 'true' }, 'channels', signal);
+      const out: SlackChannelListing[] = [];
+      for (const c of channels) {
+        const id = str(c?.id);
+        if (!id) continue;
+        out.push({ id, name: str(c.name) ?? id, is_private: c.is_private === true, is_member: c.is_member === true });
+      }
+      return out;
+    },
+    async permalink(channel, ts, signal) {
+      const body = await get<{ permalink?: unknown }>('chat.getPermalink', { channel, message_ts: ts }, signal);
+      const link = str(body.permalink);
+      if (!link) throw new SlackShapeDriftError('chat.getPermalink.permalink');
+      return link;
     },
     async usersList(signal) {
       const members = await paged<Record<string, unknown>>('users.list', {}, 'members', signal);

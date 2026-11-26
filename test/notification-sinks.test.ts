@@ -45,13 +45,19 @@ const EMAILS: Record<string, string> = { U_ALICE: 'alice@example.com', U_MALLORY
 function fakeSlack(calls: Call[]): SlackApi {
   let n = 0;
   const record = (method: string, ...args: unknown[]) => { calls.push({ method, args }); };
-  return {
+  const fake: Partial<SlackApi> = {
     async postMessage(message) { record('postMessage', message); n++; return { channel: message.channel, ts: `1700000000.00000${n}` }; },
     async updateMessage(channel, ts, message) { record('updateMessage', channel, ts, message); },
     async postEphemeral(channel, user, text) { record('postEphemeral', channel, user, text); },
     async userInfo(user) { record('userInfo', user); return { id: user, email: EMAILS[user] ?? null, name: user, deleted: false, bot: false }; },
     async isChannelMember(channel, user) { record('isChannelMember', channel, user); return channel === CHANNEL && MEMBERS.has(user); },
-  } as SlackApi;
+    async reactionsAdd() { throw new Error('reactionsAdd not expected'); },
+    async joinChannel() { throw new Error('joinChannel not expected'); },
+    async leaveChannel() { throw new Error('leaveChannel not expected'); },
+    async listChannels() { return []; },
+    async permalink() { return ''; },
+  };
+  return fake as SlackApi;
 }
 
 function signed(payload: unknown, opts: { secret?: string; ts?: number } = {}) {
