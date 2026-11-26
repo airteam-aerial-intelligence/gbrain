@@ -146,11 +146,43 @@ function noWorkerSurface(ctx: OperationContext, e: NoEmbedBackfillWorkerSurfaceE
     { fix: known ? fix : { ...fix, inputs: [{ name: 'source-id', how: 'The source to embed (`gbrain sources list` shows them).' }] } });
 }
 
+/** Airteam fork: config keys for remote submission of protected job names (default: none, upstream behavior). */
+export const REMOTE_PROTECTED_ALLOW_KEY = 'jobs.remote_protected_allow';
+export const REMOTE_PROTECTED_MAX_USD_KEY = 'jobs.remote_max_usd';
+/** Protected names no config can open to remote callers: shell runs host commands in the pod holding provider keys. */
+export const NEVER_REMOTE_JOB_NAMES: ReadonlySet<string> = new Set(['shell']);
+const REMOTE_PROTECTED_DEFAULT_MAX_USD = 5;
+
+/**
+ * True when the host lists `name` (or '*') in jobs.remote_protected_allow, the
+ * name is not in NEVER_REMOTE_JOB_NAMES, and the caller holds the admin scope.
+ */
+export async function remoteProtectedJobAllowed(ctx: OperationContext, name: string): Promise<boolean> {
+  if (NEVER_REMOTE_JOB_NAMES.has(name)) return false;
+  const { hasScope } = await import('../scope.ts');
+  if (!hasScope(ctx.auth?.scopes ?? [], 'admin')) return false;
+  const listed = ((await ctx.engine.getConfig(REMOTE_PROTECTED_ALLOW_KEY)) ?? '').split(',').map(n => n.trim()).filter(Boolean);
+  return listed.includes('*') || listed.includes(name);
+}
+
+/** Spend cap for one remotely submitted protected job: min(caller max_usd, jobs.remote_max_usd ?? $5). */
+async function remoteProtectedSpend(ctx: OperationContext, name: string, requested: unknown) {
+  const raw = Number.parseFloat((await ctx.engine.getConfig(REMOTE_PROTECTED_MAX_USD_KEY)) ?? '');
+  const hostCap = Number.isFinite(raw) && raw >= 0 ? raw : REMOTE_PROTECTED_DEFAULT_MAX_USD;
+  const callerCap = typeof requested === 'number' && Number.isFinite(requested) && requested >= 0 ? requested : undefined;
+  const cap = callerCap !== undefined ? Math.min(callerCap, hostCap) : hostCap;
+  const { jobSpendAuthorization } = await import('../minions/spend-authorization.ts');
+  return jobSpendAuthorization(
+    { consented_effects: ['paid'], cap_usd: cap, cap_source: callerCap !== undefined && callerCap <= hostCap ? 'user' : 'default', via: 'max_usd' },
+    { command: `mcp submit_job ${name}`, of: 1 },
+  );
+}
+
 const submit_job: Operation = {
   name: 'submit_job',
   idempotent: false,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: 'Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source. Other kinds require local CLI or a dedicated operation.',
+  description: 'Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus any protected kind the host lists in jobs.remote_protected_allow (never shell; each such job runs under a spend cap). Other kinds require local CLI or a dedicated operation.',
   params: {
     name: { type: 'string', required: true, description: 'Remote job type: sync, import, lint, or lint-fix. Local CLI also supports other registered types.' },
     data: { type: 'object', description: 'Remote sync accepts optional pull/noPull (one boolean); other remote jobs accept no parameters. Source and paths are derived from the grant.' },
@@ -159,6 +191,7 @@ const submit_job: Operation = {
     max_attempts: { type: 'number', description: 'Max retry attempts (default: 3)' },
     delay: { type: 'number', description: 'Delay in ms before eligible' },
     timeout_ms: { type: 'number', description: 'Per-job wall-clock timeout in ms; aborted job goes to dead' },
+    max_usd: { type: 'number', description: 'Remote protected jobs only: spend cap in USD for this job; never above the host cap jobs.remote_max_usd (default 5).' },
     lock_duration_ms: { type: 'number', description: 'Per-job lock lease in ms (#4145). Out-of-range values are clamped to [5000, 3600000] — remote writers cannot pin an immortal lock. Omit to use the handler-type default (300s for long LLM handlers) or the worker default (30s).' },
   },
   mutating: true,
@@ -166,7 +199,16 @@ const submit_job: Operation = {
   handler: async (ctx, p) => {
     const name = typeof p.name === 'string' ? p.name.trim() : '';
     let jobData = { ...((p.data as Record<string, unknown>) || {}) };
-    const remoteSubmission = ctx.remote !== false ? await prepareRemoteJob(ctx, name, p.data) : undefined;
+    const { isProtectedJobName } = await import('../minions/protected-names.ts');
+    // Airteam fork: a protected name the host opened to remote admin callers skips the generic
+    // remote-job path (sync/import/lint only) and is queued as trusted work under a spend cap.
+    const remoteProtected = ctx.remote !== false && isProtectedJobName(name) && await remoteProtectedJobAllowed(ctx, name);
+    if (remoteProtected && (name === 'subagent' || name === 'subagent_aggregator')) {
+      // Keep the agent's tool calls in the caller's own write source.
+      const callerSource = ctx.auth?.sourceId ?? (typeof ctx.sourceId === 'string' && ctx.sourceId !== '__all__' ? ctx.sourceId : undefined);
+      if (callerSource) jobData.source_id = callerSource; else delete jobData.source_id;
+    }
+    const remoteSubmission = ctx.remote !== false && !remoteProtected ? await prepareRemoteJob(ctx, name, p.data) : undefined;
     if (remoteSubmission) jobData = remoteSubmission.data;
     const translateAdmissionError = (e: unknown): never => {
       if (e instanceof InvalidEmbedBackfillSourceIdError) {
@@ -190,12 +232,11 @@ const submit_job: Operation = {
     // (the second is MinionQueue.add's check). Independent of the worker-side
     // GBRAIN_ALLOW_SHELL_JOBS env flag — even if that flag is on, MCP callers
     // cannot submit protected-type jobs.
-    const { isProtectedJobName } = await import('../minions/protected-names.ts');
     // F7b fail-closed: anything that is not strictly false (i.e., remote=true OR
     // the field somehow leaks in undefined despite the required type) rejects
     // protected job submissions. Closes the HTTP MCP shell-job RCE that surfaced
     // when the HTTP transport's OperationContext literal forgot to set remote.
-    if (ctx.remote !== false && isProtectedJobName(name)) {
+    if (ctx.remote !== false && isProtectedJobName(name) && !remoteProtected) {
       throw opError('permission_denied', `'${name}' jobs cannot be submitted over MCP (CLI-only for security)`,
         'Protected job types run only from the trusted local CLI on the brain host; the user or host operator submits it there (command in fix).',
         { fix: { ...hostFix(ctx, ['gbrain', 'jobs', 'submit', name, '--params', '<params>'], `'${name}' jobs can execute host commands, so only the brain host's own CLI may queue them.`),
@@ -208,6 +249,7 @@ const submit_job: Operation = {
     // name. Strict `=== false` so an untyped/cast context can't escalate.
     const trusted = remoteSubmission
       ? { submissionAuthority: remoteSubmission.authority }
+      : remoteProtected ? { allowProtectedSubmit: true, spendAuthorization: await remoteProtectedSpend(ctx, name, p.max_usd) }
       : ctx.remote === false && isProtectedJobName(name) ? { allowProtectedSubmit: true } : undefined;
 
     // v0.35.8.0: pre-enqueue shell-job validation, parity with the CLI submit

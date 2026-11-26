@@ -4252,7 +4252,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source. Other kinds require local CLI or a dedicated operation.",
+    "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus any protected kind the host lists in jobs.remote_protected_allow (never shell; each such job runs under a spend cap). Other kinds require local CLI or a dedicated operation.",
     "params": {
       "name": {
         "type": "string",
@@ -4282,6 +4282,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "timeout_ms": {
         "type": "number",
         "description": "Per-job wall-clock timeout in ms; aborted job goes to dead"
+      },
+      "max_usd": {
+        "type": "number",
+        "description": "Remote protected jobs only: spend cap in USD for this job; never above the host cap jobs.remote_max_usd (default 5)."
       },
       "lock_duration_ms": {
         "type": "number",

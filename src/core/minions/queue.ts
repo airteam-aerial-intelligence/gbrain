@@ -261,7 +261,7 @@ export class MinionQueue {
     // (no tools, loop declared unsupported, or unknown provider). The handler
     // (`subagent.ts`) does a defense-in-depth check at dispatch time too.
     if (jobName === 'subagent' && data && typeof data === 'object') {
-      const submittedModel = (data as { model?: unknown }).model;
+      const submittedModel = (await import('../ai/model-deny.ts')).assertModelAllowed((data as { model?: unknown }).model, 'subagent job data.model'); // Airteam fork: Fable ban
       if (typeof submittedModel === 'string' && submittedModel.length > 0) {
         const { classifyCapabilities } = await import('../ai/capabilities.ts');
         const verdict = classifyCapabilities(submittedModel);

@@ -28,6 +28,7 @@ import { retainToolWriteRequestId, awaitCommittedToolWrite, isPendingToolWrite }
 import Anthropic from '@anthropic-ai/sdk';
 import type { MinionJobContext, MinionJob } from '../types.ts';
 import { UnrecoverableError } from '../types.ts';
+import { allowedJobModelOrDead } from '../denied-model.ts';
 import type {
   ContentBlock,
   SubagentHandlerData,
@@ -351,12 +352,12 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // Default is the legacy path so v0.38 patch releases ship the same
     // behavior as v0.37. Users dogfood the gateway path by flipping the flag.
     //
-    const model = data.model
-      ?? await resolveModel(engine, {
+    const model = await allowedJobModelOrDead(data.model
+      ?? resolveModel(engine, {
         tier: 'subagent',
         configKey: 'models.subagent',
         fallback: TIER_DEFAULTS.subagent,
-      });
+      }), 'subagent');
 
     // Refuse-at-handler-entry on the FINAL resolved model, not just an
     // explicit data.model: `models.subagent` config resolves through

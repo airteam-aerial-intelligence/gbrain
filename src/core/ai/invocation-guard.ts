@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertModelAllowed } from './model-deny.ts';
 
 export interface AIInvocation {
   operation: string;
@@ -115,6 +116,8 @@ function notifyObservers(event: AIInvocationEvent): void {
  */
 export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>,
   rejected?: (error: unknown) => AIInvocationUsage | null): Promise<T> {
+  // Airteam fork: banned models never reach a provider, guarded or not.
+  assertModelAllowed(call.model, call.operation);
   const meter = meters.getStore();
   if (observers.size === 0 && !meter) return admitAndRun(call, run, usage, rejected);
   const startedAt = Date.now();

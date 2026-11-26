@@ -1,5 +1,6 @@
 import { invokeAI, sdkInvocationUsage, hasAIInvocationGuard, hasAIInvocationObservers, type AIInvocation } from './invocation-guard.ts';
 import { resolveChatContextTokens } from './model-resolver.ts';
+import { assertModelAllowed } from './model-deny.ts';
 
 export function chatInvocation(operation: string, model: string, maxOutputTokens: number): AIInvocation {
   let maxInputTokens: number | undefined;
@@ -10,6 +11,8 @@ export function chatInvocation(operation: string, model: string, maxOutputTokens
 /** Each SDK attempt has its own durable hold; local calls keep SDK retries. */
 export function createGuardedGeneration(defaultMaxOutputTokens: () => number, operation = 'gateway.generate') {
   return async function guardedGeneration<T>(model: string, transport: (opts: any) => Promise<T>, opts: any): Promise<T> {
+    // Airteam fork: the unguarded, unobserved branch below skips invokeAI, so check here too.
+    assertModelAllowed(model, operation);
     if (!hasAIInvocationGuard()) {
       if (!hasAIInvocationObservers()) return transport(opts);
       // Observed but unguarded: the transport sees the caller's options unchanged (SDK retries, token defaults).
