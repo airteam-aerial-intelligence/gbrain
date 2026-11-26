@@ -1257,3 +1257,5 @@ src/core/entities/identity-decisions.ts	fs_import	1	W7: filesystem boundary move
 src/core/entities/identity-decisions.ts	process_env	4	W7: the commit-lock marker (COMMIT_LOCK_ENV) exported to commitAndPush while the lock is held, as in access/policy-git.ts; it moves with the filesystem boundary
 src/core/entities/identity-decisions.ts	spawn_import	1	W7: process-wide effects move to src/cli (git show of the committed decision file)
 src/core/write-secret-guard.ts	process_env	1	W6: settings plane out of the core (GBRAIN_SECRETS_ON_WRITE, the environment twin of secrets.on_write; it can only tighten)
+src/core/ai/usage-observability.ts	als_store	1	W2: engine scope (decision E) replaces the usage-scope async context
+src/core/ai/usage-observability.ts	process_env	2	W1: GBRAIN_USAGE_LOG default only; callers can pass env, engine settings take it over
