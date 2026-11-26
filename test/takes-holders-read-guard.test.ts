@@ -12,8 +12,12 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = join(import.meta.dir, '..');
-/** readHolders itself, and the write authority, whose fill stays [world] for every remote caller. */
-const ALLOWED = new Set(['src/core/ops/context.ts', 'src/core/persistence/authority.ts']);
+/**
+ * readHolders itself, and the write authority, whose fill stays [world] for every remote caller. Airteam fork:
+ * remote-caller-tool.ts only ASSIGNS the field (the submitting credential's own list, or deletes it so readHolders
+ * applies the same default MCP dispatch would); it never reads it.
+ */
+const ALLOWED = new Set(['src/core/ops/context.ts', 'src/core/persistence/authority.ts', 'src/core/minions/remote-caller-tool.ts']);
 const RAW_READ = /\b(?:ctx|context|opCtx|operationContext)\??\.takesHoldersAllowList\b/;
 
 function sourceFiles(dir: string): string[] {
