@@ -51,7 +51,12 @@ function fakeSlack(calls: Call[]): SlackApi {
     async postEphemeral(channel, user, text) { record('postEphemeral', channel, user, text); },
     async userInfo(user) { record('userInfo', user); return { id: user, email: EMAILS[user] ?? null, name: user, deleted: false, bot: false }; },
     async isChannelMember(channel, user) { record('isChannelMember', channel, user); return channel === CHANNEL && MEMBERS.has(user); },
-  } as SlackApi;
+    async reactionsAdd() { throw new Error('reactionsAdd not expected'); },
+    async joinChannel() { throw new Error('joinChannel not expected'); },
+    async leaveChannel() { throw new Error('leaveChannel not expected'); },
+    async listChannels() { return []; },
+    async permalink() { return ''; },
+  } as unknown as SlackApi;
 }
 
 function signed(payload: unknown, opts: { secret?: string; ts?: number } = {}) {

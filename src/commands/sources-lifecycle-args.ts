@@ -46,7 +46,7 @@ export function parseSourceLifecycleArgs(args: string[], generatedId = randomUUI
   const valued = new Set(['request-id', 'expected-incarnation', 'brain', 'path', 'url', 'name', 'clone-dir',
     'pat-file', 'kind', 'account', 'access', 'token-command', 'token-env', 'services', 'history-days',
     'future-days', 'loops-exclude-labels', 'contacts-dir', 'calendar-id', 'scope', 'repos', 'dir', 'app-id', 'app-pem', 'app-install',
-    'provider', 'transcript', 'lookback-days', 'sync-interval-min', 'record', 'visibility', 'channels', 'timezone', 'max-requests', 'skip']);
+    'provider', 'transcript', 'lookback-days', 'sync-interval-min', 'record', 'visibility', 'channels', 'timezone', 'max-requests', 'skip', 'channels-from', 'mode']);
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i];
     if (!token.startsWith('-')) { positionals.push(token); continue; }
@@ -118,7 +118,7 @@ export function parseSourceLifecycleArgs(args: string[], generatedId = randomUUI
     ...Object.fromEntries(['provider', 'transcript'].map(key => [key, ['meetings']])),
     ...Object.fromEntries(['lookback-days', 'sync-interval-min'].map(key => [key, ['meetings', 'slack', 'imessage']])),
     ...Object.fromEntries(['record', 'visibility'].map(key => [key, ['meetings', 'slack']])),
-    ...Object.fromEntries(['channels', 'max-requests', 'skip'].map(key => [key, ['slack']])),
+    ...Object.fromEntries(['channels', 'max-requests', 'skip', 'channels-from', 'mode'].map(key => [key, ['slack']])),
     timezone: ['slack', 'imessage'],
     'history-days': ['google', 'meetings', 'slack', 'imessage'],
     'token-env': CONNECTOR_SOURCE_KINDS,
@@ -208,7 +208,15 @@ export function parseSourceLifecycleArgs(args: string[], generatedId = randomUUI
   }
   if (kind === 'slack') {
     const channels = normalizeSlackChannels(values.get('channels'));
-    if (!channels.length || channels.some(channel => !SLACK_CHANNEL_ID_RE.test(channel))) throw invalid('--channels needs one or more Slack channel ids.',
+    const channelsFrom = values.get('channels-from');
+    if (channelsFrom !== undefined && channelsFrom !== 'initiatives') throw invalid('--channels-from must be initiatives.',
+      'Pass --channels-from initiatives to also read the Slack channels of active initiatives at each sync, or leave it out.');
+    const mode = values.get('mode') ?? 'days';
+    if (mode !== 'days' && mode !== 'intake') throw invalid('--mode must be days or intake.',
+      'Pass --mode days (one page per channel per day; the default) or --mode intake (each new message becomes an idea) with --channels.');
+    if (mode === 'intake' && !channels.length) throw invalid('--mode intake needs --channels.',
+      'Pass --channels with the intake channel ids (for example --channels C0123ABCDEF) together with --mode intake.');
+    if ((!channels.length && !channelsFrom) || channels.some(channel => !SLACK_CHANNEL_ID_RE.test(channel))) throw invalid('--channels needs one or more Slack channel ids.',
       'Pass --channels as comma-separated channel ids (for example --channels C0123ABCDEF,C0456GHIJKL); a channel id is in the channel\'s details in Slack, below its name. Direct messages are not supported.');
     const timezone = values.get('timezone') ?? 'UTC';
     if (!isValidTimeZone(timezone)) throw invalid('--timezone must be an IANA time zone.', 'Pass --timezone as an IANA zone name such as UTC or America/Los_Angeles; a day page starts at midnight there.');
@@ -217,7 +225,8 @@ export function parseSourceLifecycleArgs(args: string[], generatedId = randomUUI
       `Pass --skip as a comma-separated subset of ${SLACK_SKIPPABLE.join(',')} to leave bot messages or join notices out of the pages.`);
     const maxRequests = number('max-requests');
     opts.slack = { channels, ...recordFlags('Slack page', 'pages of private channels'), ...(values.has('timezone') ? { timezone } : {}),
-      ...(maxRequests !== undefined ? { maxRequests } : {}), ...(skip.length ? { skip: skip as SlackSkippable[] } : {}) };
+      ...(maxRequests !== undefined ? { maxRequests } : {}), ...(skip.length ? { skip: skip as SlackSkippable[] } : {}),
+      ...(channelsFrom ? { channelsFrom: 'initiatives' as const } : {}), ...(mode === 'intake' ? { mode: 'intake' as const } : {}) };
   }
   if (kind === 'imessage') {
     const timezone = values.get('timezone') ?? 'UTC';
