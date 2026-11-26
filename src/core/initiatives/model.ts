@@ -74,17 +74,28 @@ function num(v: string | null | undefined, fallback: number, min: number, max: n
 }
 
 export async function readInitiativesConfig(engine: Pick<BrainEngine, 'getConfig'>): Promise<InitiativesConfig> {
-  const get = async (k: string) => engine.getConfig(k).catch(() => null);
+  const safe = (p: Promise<string | null>) => p.catch(() => null);
+  const [source, ideas, inits, projects, leave, auto, similar, dup, max] = await Promise.all([
+    safe(engine.getConfig('initiatives.source')),
+    safe(engine.getConfig('initiatives.ideas_prefix')),
+    safe(engine.getConfig('initiatives.initiatives_prefix')),
+    safe(engine.getConfig('initiatives.new_project_prefix')),
+    safe(engine.getConfig('initiatives.slack.leave_on_finish')),
+    safe(engine.getConfig('initiatives.merge.auto_apply')),
+    safe(engine.getConfig('initiatives.ideas.similar_threshold')),
+    safe(engine.getConfig('initiatives.ideas.duplicate_threshold')),
+    safe(engine.getConfig('initiatives.ideas.max_per_cycle')),
+  ]);
   return {
-    sourceId: ((await get(INITIATIVES_CONFIG.source)) ?? '').trim() || 'default',
-    ideasPrefix: normalizePrefix(await get(INITIATIVES_CONFIG.ideasPrefix), 'ideas/'),
-    initiativesPrefix: normalizePrefix(await get(INITIATIVES_CONFIG.initiativesPrefix), 'initiatives/'),
-    newProjectPrefix: normalizePrefix(await get(INITIATIVES_CONFIG.newProjectPrefix), 'projects/'),
-    slackLeaveOnFinish: truthy(await get(INITIATIVES_CONFIG.slackLeaveOnFinish), true),
-    mergeAutoApply: truthy(await get(INITIATIVES_CONFIG.mergeAutoApply), false),
-    similarThreshold: num(await get(INITIATIVES_CONFIG.similarThreshold), 0.85, 0.5, 0.99),
-    duplicateThreshold: num(await get(INITIATIVES_CONFIG.duplicateThreshold), 0.92, 0.5, 0.999),
-    maxPerCycle: Math.floor(num(await get(INITIATIVES_CONFIG.maxPerCycle), 200, 1, 5000)),
+    sourceId: (source ?? '').trim() || 'default',
+    ideasPrefix: normalizePrefix(ideas, 'ideas/'),
+    initiativesPrefix: normalizePrefix(inits, 'initiatives/'),
+    newProjectPrefix: normalizePrefix(projects, 'projects/'),
+    slackLeaveOnFinish: truthy(leave, true),
+    mergeAutoApply: truthy(auto, false),
+    similarThreshold: num(similar, 0.85, 0.5, 0.99),
+    duplicateThreshold: num(dup, 0.92, 0.5, 0.999),
+    maxPerCycle: Math.floor(num(max, 200, 1, 5000)),
   };
 }
 
