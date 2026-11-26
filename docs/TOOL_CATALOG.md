@@ -14,7 +14,7 @@ Every non-localOnly operation on the MCP surface: 191 tools across 29 areas. **S
 | `get_health` | Brain health dashboard (embed coverage, stale pages, orphans) — remote callers see counters confined to their source grant. | admin |  |  |
 | `get_stats` | Brain statistics (page count, chunk count, etc.) — remote callers see counters confined to their source grant. | admin |  |  |
 | `get_status_snapshot` | Snapshot for `gbrain status` thin-client mode: sync freshness + last cycle + queue depths + worker liveness. | admin |  |  |
-| `get_usage` | Aggregate chat usage + cost from the chat_usage_log ledger (per-model and per-phase token counts, cache reads/writes, USD estimates) with explicit coverage fields. | admin |  |  |
+| `get_usage` | Aggregate usage + cost of all provider calls (chat, expansion, embedding, rerank, subagent) from the chat_usage_log ledger (per-model, per-phase and per-kind token counts, cache reads/writes, USD estimates) with explicit coverage fields. | admin |  |  |
 | `get_write_attribution` | Admin read: who created and who last changed a page, or one of its facts, takes or timeline entries. | admin |  |  |
 | `mute_notice` | Mute a coaching or info notice (or first_run_decisions) for this client. | write | yes |  |
 | `quarantine_list` | List quarantined (hidden) and optionally content-flagged pages by scanning page frontmatter, newest-updated first. | admin |  |  |

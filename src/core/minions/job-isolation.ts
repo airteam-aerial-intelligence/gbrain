@@ -96,7 +96,11 @@ export function childConfigurationError(reason: typeof CHILD_CONFIGURATION_REASO
 
 export type ChildErrorKind = 'unrecoverable' | 'refused' | 'rate_lease' | 'deferred' | 'generic' | 'local_configuration';
 
-export type ChildOutcome =
+export type ChildOutcome = ChildOutcomeBody & {
+  /** The child's per-model provider-usage totals (usage-observability.ts JSON form); the worker validates it. */
+  usage?: unknown;
+};
+type ChildOutcomeBody =
   | { outcome: 'success'; result: unknown }
   | {
       outcome: 'error';
@@ -196,6 +200,13 @@ export function writeChildOutcomeFile(path: string, outcome: ChildOutcome): void
  * lease-release accounting.
  */
 export function parseChildOutcome(raw: string, size: number, maxBytes = CHILD_OUTCOME_MAX_BYTES): ChildOutcome {
+  let parsed: unknown;
+  const outcome = parseChildOutcomeBody(raw, size, maxBytes, p => { parsed = p; });
+  const usage = (parsed as { usage?: unknown } | null | undefined)?.usage;
+  return usage !== null && typeof usage === 'object' ? { ...outcome, usage } : outcome;
+}
+
+function parseChildOutcomeBody(raw: string, size: number, maxBytes: number, onParsed: (parsed: unknown) => void): ChildOutcome {
   if (size > maxBytes) {
     throw new UnrecoverableError(
       `job child result exceeds the ${Math.floor(maxBytes / (1024 * 1024))}MiB outcome cap (${size} bytes); ` +
@@ -208,6 +219,7 @@ export function parseChildOutcome(raw: string, size: number, maxBytes = CHILD_OU
   } catch {
     throw new Error(`job child outcome file is not valid JSON (${size} bytes)`);
   }
+  onParsed(parsed);
   const o = parsed as Partial<ChildOutcome> | null;
   if (o && o.outcome === 'success') return { outcome: 'success', result: (o as { result?: unknown }).result };
   if (o && o.outcome === 'error' && typeof (o as { message?: unknown }).message === 'string') {

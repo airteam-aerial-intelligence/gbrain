@@ -41,8 +41,10 @@ describe('drain-loop wiring (structural — the shape guard only covers worker.t
     // work (dream synthesize wraps `phase:synthesize`) silently absorbed every
     // inline-drained child's gateway spend into the phase tag — exactly the
     // double-counting the phase telemetry's one-ledger-per-surface rule
-    // forbids. The child's own `job:<name>` tag must win.
-    expect(src).toContain("withChatPhase(`job:${job.name}`, () => handler(context))");
+    // forbids. The child's own `job:<name>` tag must win. runJobWithUsage
+    // (job-usage.ts) applies it together with the worker's job attribution;
+    // behavior is pinned in test/usage-observability-job.test.ts.
+    expect(src).toContain('runJobWithUsage(job, () => handler(context))');
     expect(src).not.toMatch(/result = await handler\(context\);/);
   });
 });

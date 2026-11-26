@@ -22,6 +22,7 @@ import { credentialScopeFor, requesterScopeGate, requesterScopeRefuses, requires
 import type { GuestChannels } from '../core/guests/admission.ts';
 import { assessRoom, readRoomDeclaration, roomResponseCapNotice, type RoomChannels, type RoomDeclaration } from '../core/access/room.ts';
 import { audienceInArguments, audienceInArgumentsError, logAudienceAssertion, parseAudience, type AudienceAuditEvent, type AudienceChannels, type AudiencePrincipal } from '../core/access/audience.ts';
+import { withOpUsage } from './op-usage.ts';
 import { ACTOR_ARGUMENT, actorNotAttested, EXTERNAL_ID_RE, resolveAttestedActor, type ActorChannels } from '../core/access/actor.ts';
 import { attestedReadMode, scopeReadAccess, scopeReadLabelledOnlyRefused, withReadMode, type ReadMode } from '../core/access/scope-read.ts';
 import { attestedReadScope } from '../core/access/member-sources.ts';
@@ -1411,7 +1412,7 @@ async function dispatchResolvedCall(
         if (!(error instanceof OperationError) || error.code !== 'writer_registration_required' || op.requiredScopes?.length) throw error;
       }
     }
-    const result = registration
+    const result = await withOpUsage(ctx, name, async () => registration
       ? await withVerifiedLocalRegistration(engine, registration, async verified => {
         if (!verified.remote) throw opError('permission_denied', 'This registration is not an agent-facing connection.',
           `${name} on this stdio connection needs the agent-facing stdio writer registration, which only the user can create in a terminal on the brain host.`,
@@ -1419,7 +1420,7 @@ async function dispatchResolvedCall(
             'Previews the agent-facing stdio registration; the user reruns it without --dry-run (with --replace and the complete grant when a registration exists).') });
         return op.handler(ctx, safeParams);
       })
-      : await op.handler(ctx, safeParams);
+      : await op.handler(ctx, safeParams));
     if (emptyRead(name, result)) await assertUnscopedReadReachesPages(name, safeParams, ctx);
     // Hot memory built before a write (forget, remember, …) is never served after it, on every transport;
     // #6696 (A4): the write's receipt carries the capacity notices (60 s snapshot, at most hourly per scope).
