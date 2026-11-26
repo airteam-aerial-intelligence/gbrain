@@ -6,7 +6,7 @@
  * Paths: inline handler; the isolation child core (`runChildJobEntry`, which
  * reports its totals in the outcome file); the isolated parent folding a
  * child's reported totals, or marking `usage_complete: false` when the child
- * died before reporting. Errors on the end line are capped at 300 chars.
+ * died before reporting. The end line carries an error class, never the message.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -16,6 +16,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { runChildJobEntry } from '../src/core/minions/run-child.ts';
+import { runSubagentsInline } from '../src/core/cycle/inline-drain.ts';
+import { runJobWithUsage } from '../src/core/minions/job-usage.ts';
 import { decodeChildOutcomeFile } from '../src/core/minions/job-isolation.ts';
 import { setChatUsageSink, type ChatUsageRecord } from '../src/core/ai/chat-usage.ts';
 import { invokeAI, sdkInvocationUsage } from '../src/core/ai/invocation-guard.ts';
@@ -99,7 +101,7 @@ describe('inline worker', () => {
 
     const [start, end] = jobLines(job.id);
     expect(start).toMatchObject({ phase: 'start', name: 'usagetest', queue: 'default', severity: 'INFO', attempts: 1 });
-    expect(end).toMatchObject({ phase: 'end', status: 'completed', calls: 2, unpriced_calls: 0, error: null });
+    expect(end).toMatchObject({ phase: 'end', status: 'completed', calls: 2, unpriced_calls: 0, error_class: null });
     expect(end!.models[MODEL]).toMatchObject({ calls: 2, input_tokens: 200, output_tokens: 40 });
     expect(end!.cost_usd).toBeGreaterThan(0);
     expect(typeof end!.duration_ms).toBe('number');
@@ -108,14 +110,17 @@ describe('inline worker', () => {
     expect(end).not.toHaveProperty('usage_complete');
   });
 
-  test('a failing job ends with its status and an error capped at 300 chars', async () => {
+  test('a failing job ends with its status and an error class (never the message)', async () => {
     const worker = new MinionWorker(engine, { queue: 'default', concurrency: 1, pollInterval: 25, healthCheckInterval: 0, maxRssMb: 0 });
-    worker.register('usagefail', async () => { await modelCall(); throw new Error('x'.repeat(1000)); });
+    class SecretBearingError extends Error {}
+    worker.register('usagefail', async () => { await modelCall(); throw new SecretBearingError('x'.repeat(1000)); });
     const job = await queue.add('usagefail', {}, { max_attempts: 1 });
     await runWorkerUntil(worker, async () => jobLines(job.id).length === 2);
     const end = jobLines(job.id)[1]!;
     expect(end.status).toBe('dead');
-    expect(end.error.length).toBe(300);
+    expect(end.error_class).toBe('SecretBearingError');
+    expect(end).not.toHaveProperty('error');
+    expect(JSON.stringify(end)).not.toContain('xxxx');
     expect(end.calls).toBe(1);
   });
 });
@@ -160,4 +165,28 @@ describe('isolated parent', () => {
     expect(end).toMatchObject({ usage_complete: false, calls: 0 });
     expect(end.status).not.toBe('completed');
   }, 20_000);
+});
+
+describe('inline drains (worker attribution parity)', () => {
+  test('the cycle inline drain attributes calls to the job and brackets it with gbrain.job lines', async () => {
+    const job = await queue.add('subagent', { prompt: 'p' }, { queue: 'usage-inline' }, { allowProtectedSubmit: true });
+    await runSubagentsInline(engine, queue, 'usage-inline', undefined, async () => { await modelCall(); return { ok: true }; });
+    expect(await statusOf(job.id)).toBe('completed');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ job_id: job.id, job_name: 'subagent', phase: 'job:subagent' });
+    expect(lines.find(l => l.evt === 'gbrain.llm_call')).toMatchObject({ job_id: job.id, job_name: 'subagent' });
+    const [start, end] = jobLines(job.id);
+    expect(start).toMatchObject({ phase: 'start', name: 'subagent' });
+    expect(end).toMatchObject({ phase: 'end', status: 'completed', calls: 1, error_class: null });
+  }, 30_000);
+
+  test('runJobWithUsage (facts drain path) ends a throwing handler with its error class and rethrows', async () => {
+    const job = await queue.add('facts-absorb-probe', {});
+    class AbsorbBoom extends Error {}
+    await expect(runJobWithUsage(job, async () => { await modelCall(); throw new AbsorbBoom('secret text'); })).rejects.toBeInstanceOf(AbsorbBoom);
+    expect(rows[0]).toMatchObject({ job_id: job.id, job_name: 'facts-absorb-probe' });
+    const end = jobLines(job.id)[1]!;
+    expect(end).toMatchObject({ phase: 'end', status: 'error', error_class: 'AbsorbBoom', calls: 1 });
+    expect(JSON.stringify(end)).not.toContain('secret text');
+  });
 });

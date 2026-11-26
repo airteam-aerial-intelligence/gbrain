@@ -23,6 +23,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { observeAIInvocations, type AIInvocation, type AIInvocationEvent, type AIInvocationUsage } from './invocation-guard.ts';
 import { currentChatPhase, estimateChatCostUsd, recordProviderCall, type ChatUsageRecord } from './chat-usage.ts';
 import { canonicalPricingKey, priceFor, type BudgetKind } from '../budget/reservation-cost.ts';
+import { isStdoutLoggingRedirected } from '../console-prefix.ts';
 
 export type UsageLogMode = 'off' | 'stderr' | 'stdout';
 
@@ -33,13 +34,17 @@ export function usageLogMode(env: NodeJS.ProcessEnv = process.env): UsageLogMode
   return 'stderr';
 }
 
-/** Write one usage line (single write, so lines never interleave). Silent when the mode is `off`. Never throws. */
+/**
+ * Write one usage line (single write, so lines never interleave). Silent when
+ * the mode is `off`. Under stdio MCP serve (stdout logging redirected, stdout
+ * is the JSON-RPC channel) `stdout` mode writes to stderr instead. Never throws.
+ */
 export function emitUsageLine(obj: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): void {
   try {
     const mode = usageLogMode(env);
     if (mode === 'off') return;
     const line = JSON.stringify({ ts: new Date().toISOString(), severity: 'INFO', ...obj }) + '\n';
-    if (mode === 'stdout') process.stdout.write(line);
+    if (mode === 'stdout' && !isStdoutLoggingRedirected()) process.stdout.write(line);
     else process.stderr.write(line);
   } catch {
     /* fail-open */
@@ -244,7 +249,7 @@ export function usageRowOf(event: AIInvocationEvent, cost: number | null): ChatU
   return {
     model: event.call.model,
     provider: providerOf(event.call.model),
-    phase: currentChatPhase() ?? a.phase ?? null,
+    phase: a.phase ?? currentChatPhase(),
     input_tokens: u ? nonNegInt(u.inputTokens) + read + write : 0,
     output_tokens: nonNegInt(u?.outputTokens),
     cache_read_tokens: read,
@@ -259,6 +264,8 @@ export function usageRowOf(event: AIInvocationEvent, cost: number | null): ChatU
     cli_command: a.cli_command ?? null,
     latency_ms: nonNegInt(event.ms),
     outcome: event.outcome,
+    transport: a.transport ?? null,
+    error_class: event.errorClass ?? null,
   };
 }
 

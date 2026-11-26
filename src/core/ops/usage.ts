@@ -1,8 +1,8 @@
 /**
  * Usage accounting op cluster (#4218, revives the #3392 shape).
  *
- * `get_usage` reads the chat_usage_log ledger (migration v140, attribution
- * columns v328) that the usage observer fills with one row per provider call
+ * `get_usage` reads the chat_usage_log ledger (migration v140; attribution
+ * columns added by the idempotent schema bootstrap, no numbered migration) that the usage observer fills with one row per provider call
  * (chat, expansion, embedding, rerank, multimodal, subagent; any outcome).
  * Aggregates only — no raw rows — so the surface exposes spend/volume, never
  * content. The `coverage` block is the honesty contract: it states exactly
@@ -82,7 +82,7 @@ const get_usage: Operation = {
            GROUP BY 1 ORDER BY 3 DESC NULLS LAST`,
           [days],
         );
-      } catch { /* pre-v328: no kind column */ }
+      } catch { /* bootstrap has not added the kind column yet */ }
     } catch {
       // Pre-v136 brain (table absent). Report empty with coverage saying so
       // rather than erroring — the op is a read surface, not a migration gate.
@@ -156,7 +156,7 @@ const get_usage: Operation = {
       totals: { ...totals, cost_usd: Math.round(totals.cost_usd * 1e6) / 1e6 },
       by_model: [...byModel.values()].sort((a, b) => (b.cost_usd ?? 0) - (a.cost_usd ?? 0)),
       by_phase: [...byPhase.values()].sort((a, b) => b.cost_usd - a.cost_usd),
-      /** Rows from before v328 carry no kind; they were chat calls. */
+      /** Rows written before the attribution columns existed carry no kind; they were chat calls. */
       by_kind: byKind.map(k => ({ kind: k.kind, calls: n(k.calls), cost_usd: k.cost_usd == null ? null : n(k.cost_usd) })),
       // Explicit coverage fields (#4218): state what the ledger captures so a
       // consumer never mistakes a partial ledger for total spend.
@@ -171,7 +171,7 @@ const get_usage: Operation = {
         not_covered: [
           'calls made before migration v140 / sink registration, or by a process with no engine',
           'calls refused by admission before reaching the provider',
-          'attribution columns (kind, job, op, caller, CLI command) on rows written before migration v328',
+          'attribution columns (kind, job, op, caller, CLI command) on rows written before the schema bootstrap added them',
         ],
       },
     };

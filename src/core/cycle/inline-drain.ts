@@ -42,7 +42,7 @@ import { jobRefusal, refusedJobResult } from '../minions/refusal.ts';
 import { makeSubagentHandler } from '../minions/handlers/subagent.ts';
 import { RateLeaseUnavailableError, leaseFullBackoffMs } from '../minions/rate-leases.ts';
 import { reconnectAfterConnectionError } from '../minions/reconnect.ts';
-import { withChatPhase } from '../ai/chat-usage.ts';
+import { runJobWithUsage } from '../minions/job-usage.ts';
 import { isRetryableConnError } from '../retry-matcher.ts';
 import { anySignal, throwIfAborted } from '../abort-check.ts';
 import { CYCLE_DEADLINE_RESERVE_MS } from './base-phase.ts';
@@ -365,8 +365,9 @@ async function drainLoop(
         // caller's AsyncLocalStorage phase — a cycle phase that wraps its own
         // work (e.g. dream synthesize) would silently absorb every child's
         // spend into the phase tag, breaking the one-ledger-per-surface rule
-        // the phase telemetry depends on.
-        result = await withChatPhase(`job:${job.name}`, () => handler(context));
+        // the phase telemetry depends on. runJobWithUsage also carries the
+        // worker's job_id/job_name attribution, usage scope and gbrain.job lines.
+        result = await runJobWithUsage(job, () => handler(context));
         handlerRan = true;
       } catch (e) {
         handlerErr = e;

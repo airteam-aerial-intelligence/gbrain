@@ -1504,7 +1504,7 @@ export class MinionWorker extends EventEmitter {
   private async executeJobBody(job: MinionJob, lockToken: string, abort: AbortController, lockTimer: ReturnType<typeof setInterval>, run: JobUsageRun): Promise<void> {
     const handler = this.handlers.get(job.name);
     if (!handler) {
-      noteJobUsage(run, 'dead', `No handler for job type '${job.name}'`); await this.queue.failJob(job.id, lockToken, `No handler for job type '${job.name}'`, 'dead');
+      noteJobUsage(run, 'dead', 'no_handler'); await this.queue.failJob(job.id, lockToken, `No handler for job type '${job.name}'`, 'dead');
       return;
     }
 
@@ -1578,7 +1578,7 @@ export class MinionWorker extends EventEmitter {
         : await this.queue.completeJob(job.id, lockToken, jobOutcomeResult(stored, verdict));
       const execution = this.executions.get(lockToken);
       if (execution) execution.stopped = true;
-      noteJobUsage(run, verdict.outcome === 'failed' ? 'failed' : 'completed', verdict.outcome === 'failed' ? verdict.reason : undefined);
+      noteJobUsage(run, verdict.outcome === 'failed' ? 'failed' : 'completed', verdict.outcome === 'failed' ? 'job_failed' : undefined);
 
       if (!completed) {
         console.warn(`Job ${job.id} completion dropped (lock token mismatch, job was reclaimed)`);
@@ -1613,7 +1613,7 @@ export class MinionWorker extends EventEmitter {
       } else {
         errorText = err instanceof Error ? err.message : String(err);
       }
-      noteJobUsage(run, 'released', errorText);
+      noteJobUsage(run, 'released', abortReason !== null ? 'aborted' : err);
       if (abortReason === 'watchdog' && await settleWatchdogAbort(this.queue, this.engine, job, lockToken, this.inFlight.get(job.id)?.shared !== false, execution?.stopped !== false)) return;
 
       // v0.41.22.2 (D8a / codex C6): infrastructure aborts (lock-renewal-failed,

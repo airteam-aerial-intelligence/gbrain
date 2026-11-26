@@ -29,7 +29,10 @@
  * Coverage contract (surfaced by the `get_usage` op): every provider call in
  * a process whose sink is registered, with its outcome (failed calls record
  * 0 tokens and cost NULL). Calls made before the sink was registered or
- * before migration v140 are NOT covered; the attribution columns need v328.
+ * before migration v140 are NOT covered. The attribution columns have no
+ * numbered migration: the idempotent schema bootstrap
+ * (src/core/engine-sql/bootstrap.ts) adds them on every initSchema; a brain
+ * not yet re-initialized falls back to the original 8-column INSERT.
  * The budget tracker (budget-tracker.ts) remains the pessimistic in-flight
  * spend gate; this table is the after-the-fact ledger.
  *
@@ -57,7 +60,7 @@ export interface ChatUsageRecord {
   cache_write_tokens: number;
   /** USD, priced from CANONICAL_PRICING. NULL when the model has no pricing. */
   cost_usd: number | null;
-  /** Attribution (migration v328). Absent/null = unknown. */
+  /** Attribution (bootstrap-added columns; see schema.sql). Absent/null = unknown. */
   kind?: string | null;
   operation?: string | null;
   job_id?: number | null;
@@ -67,7 +70,17 @@ export interface ChatUsageRecord {
   cli_command?: string | null;
   latency_ms?: number | null;
   outcome?: string | null;
+  /** 'mcp' | 'http' | 'cli' | ... from the enclosing AI attribution. */
+  transport?: string | null;
+  /** Error class on a failed call (constructor name or `http_<status>`), never its message. */
+  error_class?: string | null;
 }
+
+/** Columns the bootstrap adds; a brain missing any of them gets the legacy INSERT. */
+const ATTRIBUTION_COLUMNS = [
+  'kind', 'operation', 'job_id', 'job_name', 'op', 'caller', 'cli_command',
+  'latency_ms', 'outcome', 'transport', 'error_class',
+] as const;
 
 export type ChatUsageSink = (record: ChatUsageRecord) => void | Promise<void>;
 
@@ -263,32 +276,52 @@ export function makeEngineChatUsageSink(engine: {
   executeRaw: (sql: string, params?: unknown[]) => Promise<unknown>;
 }): ChatUsageSink {
   return async (r: ChatUsageRecord): Promise<void> => {
-    await engine.executeRaw(
-      `INSERT INTO chat_usage_log
-         (model, provider, phase, input_tokens, output_tokens,
-          cache_read_tokens, cache_write_tokens, cost_usd,
-          kind, operation, job_id, job_name, op, caller, cli_command,
-          latency_ms, outcome)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
-      [
-        r.model,
-        r.provider,
-        r.phase,
-        r.input_tokens,
-        r.output_tokens,
-        r.cache_read_tokens,
-        r.cache_write_tokens,
-        r.cost_usd,
-        r.kind ?? null,
-        r.operation ?? null,
-        r.job_id ?? null,
-        r.job_name ?? null,
-        r.op ?? null,
-        r.caller ?? null,
-        r.cli_command ?? null,
-        r.latency_ms ?? null,
-        r.outcome ?? null,
-      ],
-    );
+    const base = [
+      r.model,
+      r.provider,
+      r.phase,
+      r.input_tokens,
+      r.output_tokens,
+      r.cache_read_tokens,
+      r.cache_write_tokens,
+      r.cost_usd,
+    ];
+    try {
+      await engine.executeRaw(
+        `INSERT INTO chat_usage_log
+           (model, provider, phase, input_tokens, output_tokens,
+            cache_read_tokens, cache_write_tokens, cost_usd,
+            kind, operation, job_id, job_name, op, caller, cli_command,
+            latency_ms, outcome, transport, error_class)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+        [
+          ...base,
+          r.kind ?? null,
+          r.operation ?? null,
+          r.job_id ?? null,
+          r.job_name ?? null,
+          r.op ?? null,
+          r.caller ?? null,
+          r.cli_command ?? null,
+          r.latency_ms ?? null,
+          r.outcome ?? null,
+          r.transport ?? null,
+          r.error_class ?? null,
+        ],
+      );
+    } catch (err) {
+      // A brain whose schema bootstrap has not added the attribution columns
+      // yet (older binary initialized it, no initSchema since): fall back once
+      // to the original 8-column INSERT. Lazy import keeps this module a leaf.
+      const { isMissingSchemaObject } = await import('../utils.ts');
+      if (!isMissingSchemaObject(err, 'column', ATTRIBUTION_COLUMNS)) throw err;
+      await engine.executeRaw(
+        `INSERT INTO chat_usage_log
+           (model, provider, phase, input_tokens, output_tokens,
+            cache_read_tokens, cache_write_tokens, cost_usd)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        base,
+      );
+    }
   };
 }

@@ -1054,7 +1054,7 @@ CREATE INDEX IF NOT EXISTS extract_atoms_transcript_state_tombstoned_idx
   ON extract_atoms_transcript_state (source_id, content_hash)
   WHERE tombstoned;
 
--- chat_usage_log (#4218 / migration v140, attribution v328): durable per-call
+-- chat_usage_log (#4218 / migration v140): durable per-call
 -- provider usage ledger. One row per provider call (chat, expansion, embedding,
 -- rerank, multimodal, subagent; any outcome), written fire-and-forget by the
 -- usage observer (src/core/ai/usage-observability.ts → chat-usage.ts). cost_usd is a
@@ -1071,7 +1071,9 @@ CREATE TABLE IF NOT EXISTS chat_usage_log (
   cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd           DOUBLE PRECISION,
-  -- Migration v328: what caused the call. All nullable (old writers still insert).
+  -- Attribution: what caused the call. No numbered migration; existing brains
+  -- gain these via the idempotent bootstrap in src/core/engine-sql/bootstrap.ts.
+  -- All nullable (old writers still insert).
   kind               TEXT,
   operation          TEXT,
   job_id             BIGINT,
@@ -1080,7 +1082,9 @@ CREATE TABLE IF NOT EXISTS chat_usage_log (
   caller             TEXT,
   cli_command        TEXT,
   latency_ms         INTEGER,
-  outcome            TEXT
+  outcome            TEXT,
+  transport          TEXT,
+  error_class        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
   ON chat_usage_log (created_at);

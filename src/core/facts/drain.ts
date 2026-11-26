@@ -316,7 +316,7 @@ export async function runFactsDrain(engine: BrainEngine, opts: FactsDrainRunOpts
     const { RateLeaseUnavailableError, leaseFullBackoffMs } = await import('../minions/rate-leases.ts');
     const { buildJobContext } = await import('../minions/job-context.ts');
     const { authorizeJobExecution, withSubmissionAuthority } = await import('../minions/submission-authority.ts');
-    const { withChatPhase } = await import('../ai/chat-usage.ts');
+    const { runJobWithUsage } = await import('../minions/job-usage.ts');
     const { calculateBackoff } = await import('../minions/backoff.ts');
     const { defaultLockDurationMsFor } = await import('../minions/handler-timeouts.ts');
     const handler = withFactsAbsorbHaltCooldown(makeFactsAbsorbHandler(engine));
@@ -364,7 +364,7 @@ export async function runFactsDrain(engine: BrainEngine, opts: FactsDrainRunOpts
       try {
         const authority = await authorizeJobExecution(engine, job);
         const ctx = buildJobContext(engine, queue, job, lockToken, abort.signal, opts.signal ?? abort.signal);
-        value = await withBudgetTracker(tracker, () => withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => handler(ctx)), abort.signal));
+        value = await withBudgetTracker(tracker, () => withSubmissionAuthority(authority, () => runJobWithUsage(job, () => handler(ctx)), abort.signal));
       } catch (e) {
         thrown = e ?? new Error('facts-absorb failed');
       } finally {

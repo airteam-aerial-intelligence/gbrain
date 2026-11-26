@@ -593,7 +593,9 @@ CREATE TABLE IF NOT EXISTS chat_usage_log (
   caller             TEXT,
   cli_command        TEXT,
   latency_ms         INTEGER,
-  outcome            TEXT
+  outcome            TEXT,
+  transport          TEXT,
+  error_class        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
   ON chat_usage_log (created_at);

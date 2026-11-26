@@ -2202,7 +2202,9 @@
           "16 caller text/text NULL",
           "17 cli_command text/text NULL",
           "18 latency_ms integer/int4 NULL",
-          "19 outcome text/text NULL"
+          "19 outcome text/text NULL",
+          "20 transport text/text NULL",
+          "21 error_class text/text NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

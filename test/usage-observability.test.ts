@@ -230,3 +230,55 @@ describe('subagent raw-SDK path (subagent_legacy)', () => {
     expect(lines.find(l => l.operation === 'subagent_legacy')).toMatchObject({ job_id: job.id, job_name: 'subagent' });
   });
 });
+
+describe('review fixes', () => {
+  test('GBRAIN_USAGE_LOG=stdout under stdio serve (stdout redirected) writes to stderr, never the JSON-RPC stream', async () => {
+    const { redirectStdoutLoggingToStderr, _resetStdoutRedirectForTests } = await import('../src/core/console-prefix.ts');
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    let out = '', err = '';
+    process.stdout.write = ((c: any, ...r: any[]) => { const s = String(c); if (s.includes('gbrain.llm_call')) { out += s; return true; } return origOut(c, ...r); }) as typeof process.stdout.write;
+    process.stderr.write = ((c: any, ...r: any[]) => { const s = String(c); if (s.includes('gbrain.llm_call')) { err += s; return true; } return origErr(c, ...r); }) as typeof process.stderr.write;
+    redirectStdoutLoggingToStderr();
+    try {
+      await withEnv({ GBRAIN_USAGE_LOG: 'stdout' }, () =>
+        invokeAI({ operation: 't', kind: 'chat', model: 'anthropic:claude-haiku-4-5' }, async () => ({ usage: { inputTokens: 1, outputTokens: 1 } }), sdkInvocationUsage));
+    } finally {
+      _resetStdoutRedirectForTests();
+      process.stdout.write = origOut;
+      process.stderr.write = origErr;
+    }
+    expect(out).toBe('');
+    expect(JSON.parse(err.trim()).evt).toBe('gbrain.llm_call');
+  });
+
+  test('a fetch-based call resolving with HTTP 429 is observed as outcome error, error_class http_429; the Response is still returned', async () => {
+    capture();
+    const response = new Response('slow down', { status: 429 });
+    const { lines, result } = await linesOf(() => invokeAI({ operation: 'gateway.rerank', kind: 'rerank', model: 'voyage:rerank-2' },
+      async () => response, () => null));
+    await drain();
+    expect(result).toBe(response);
+    expect(lines[0]).toMatchObject({ outcome: 'error', error_class: 'http_429' });
+    expect(rows[0]).toMatchObject({ outcome: 'error', error_class: 'http_429' });
+  });
+
+  test('an ok Response stays outcome ok with no error_class', async () => {
+    capture();
+    const { lines } = await linesOf(() => invokeAI({ operation: 'gateway.rerank', kind: 'rerank', model: 'voyage:rerank-2' },
+      async () => new Response('{}', { status: 200 }), () => null));
+    await drain();
+    expect(lines[0]).toMatchObject({ outcome: 'ok', error_class: null });
+    expect(rows[0]).toMatchObject({ outcome: 'ok', error_class: null });
+  });
+
+  test('row and line agree on phase (attribution phase wins) and the row carries transport', async () => {
+    capture();
+    const { withChatPhase } = await import('../src/core/ai/chat-usage.ts');
+    const { lines } = await linesOf(() => withChatPhase('phase:outer', () => withAIAttribution({ phase: 'attr-phase', transport: 'mcp' }, () =>
+      invokeAI({ operation: 't', kind: 'chat', model: 'anthropic:claude-haiku-4-5' }, async () => ({ usage: { inputTokens: 1, outputTokens: 1 } }), sdkInvocationUsage))));
+    await drain();
+    expect(lines[0]).toMatchObject({ phase: 'attr-phase', transport: 'mcp' });
+    expect(rows[0]).toMatchObject({ phase: 'attr-phase', transport: 'mcp' });
+  });
+});

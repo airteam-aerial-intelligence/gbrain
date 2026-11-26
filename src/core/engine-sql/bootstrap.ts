@@ -175,6 +175,7 @@ const FORWARD_REFERENCE_PROBES: readonly Probe[] = [
   ['link_transitions_link_source_exists', 'link_transitions', 'link_source'],
   ['chat_usage_log_exists', 'chat_usage_log'],
   ['chat_usage_log_job_id_exists', 'chat_usage_log', 'job_id'],
+  ['chat_usage_log_error_class_exists', 'chat_usage_log', 'error_class'],
 ];
 
 // Probed only where `dreamVerdictsForwardReference` (the Postgres blob).
@@ -327,9 +328,12 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
   // the replay (CREATE INDEX IF NOT EXISTS checks columns before the name).
   const needsLinkTransitionsLinkSource = probe.link_transitions_exists
     && !probe.link_transitions_link_source_exists;
-  // v328: the blob's partial idx_chat_usage_log_job references job_id, a column
-  // only v328 adds to a brain at v140-v327.
-  const needsChatUsageJobId = probe.chat_usage_log_exists && !probe.chat_usage_log_job_id_exists;
+  // chat_usage_log attribution columns (no numbered migration; added here
+  // only): the blob's partial idx_chat_usage_log_job references job_id, which a
+  // brain created at v140+ before these columns existed lacks. error_class is
+  // the last column added, so its absence means some attribution column is missing.
+  const needsChatUsageAttribution = probe.chat_usage_log_exists
+    && (!probe.chat_usage_log_job_id_exists || !probe.chat_usage_log_error_class_exists);
   return {
     needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap, needsPagesDeletedAt,
     needsMcpLogBootstrap, needsSubagentProviderId, needsChunksEmbeddingImage, needsPagesRecency,
@@ -339,7 +343,7 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
     needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
-    needsLinkTransitionsLinkSource, needsChatUsageJobId,
+    needsLinkTransitionsLinkSource, needsChatUsageAttribution,
   };
 }
 
@@ -358,7 +362,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
     needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
-    needsLinkTransitionsLinkSource, needsChatUsageJobId,
+    needsLinkTransitionsLinkSource, needsChatUsageAttribution,
   } = gaps;
 
   if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -377,7 +381,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
       && !needsMinionJobsPrivateQueue && !needsMinionJobsAuthority
       && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity
       && !needsDerivedGenerationItemsPending
-      && !needsLinkTransitionsLinkSource && !needsChatUsageJobId) return;
+      && !needsLinkTransitionsLinkSource && !needsChatUsageAttribution) return;
 
   process.stderr.write('  Schema forward-reference gap detected, applying bootstrap\n');
 
@@ -610,7 +614,7 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     needsPagesGeneration, needsPagesEmbeddingSignature, needsPagesLinksExtractedAt,
     needsTimelineEventPageId, needsMinionJobsTimeoutAt, needsMinionJobsIdempotencyKey,
     needsDreamVerdictsExpiresAt, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource, needsChatUsageJobId,
+    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource, needsChatUsageAttribution,
   } = gaps;
 
   if (needsPagesLastRetrievedAt) {
@@ -759,9 +763,11 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     `);
   }
 
-  if (needsChatUsageJobId) {
-    // Columns only, exactly as v328 adds them and in its order (so an upgraded
-    // brain's column order matches a fresh one); v328 still runs and owns the index.
+  if (needsChatUsageAttribution) {
+    // The attribution columns have no numbered migration: this idempotent
+    // bootstrap is their only upgrade path (it runs on every initSchema before
+    // the blob replay). Same order as schema.sql, so an upgraded brain's column
+    // order matches a fresh one; the blob replay then creates idx_chat_usage_log_job.
     await exec(`
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS kind TEXT;
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS operation TEXT;
@@ -772,6 +778,8 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS cli_command TEXT;
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS outcome TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS transport TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS error_class TEXT;
     `);
   }
 }
