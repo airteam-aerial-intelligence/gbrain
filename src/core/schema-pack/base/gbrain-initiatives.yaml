@@ -9,6 +9,7 @@
 #   initiatives/<slug>  type initiative  time-boxed work; facts from its bound
 #                                        Slack channels attach here (fact_target);
 #                                        status active | done | cancelled
+#   initiatives/<slug>/<doc>  type initiative-doc  supporting design documents
 #
 #   initiative --implements--> idea          (frontmatter `implements:`)
 #   initiative --targets-->    project|concept (frontmatter `targets:`)
@@ -44,6 +45,15 @@ page_types:
     extractable: false
     expert_routing: false
     fact_target: true
+  # A supporting document of an initiative (design notes, decision log, FAQ),
+  # filed under the initiative's slug with an explicit `type: initiative-doc`.
+  # Neither a fact source nor a fact target: planned design is not status quo.
+  - name: initiative-doc
+    primitive: concept
+    path_prefixes: []
+    aliases: []
+    extractable: false
+    expert_routing: false
   # gbrain-base-v2 folds `initiative` into `project` as an alias; initiative is
   # its own type here, so project keeps only `workstream`.
   - name: project

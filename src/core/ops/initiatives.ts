@@ -112,6 +112,9 @@ const initiative_status: Operation = {
       const t = await readPage(ctx.engine, cfg.sourceId, ref);
       targets.push({ slug: ref, exists: !!t, type: t?.type ?? null, title: t?.title ?? null });
     }
+    const docs = await ctx.engine.executeRaw<{ slug: string; title: string | null }>(
+      `SELECT slug, title FROM pages WHERE source_id = $1 AND slug LIKE $2 AND type = 'initiative-doc' AND deleted_at IS NULL ORDER BY slug`,
+      [cfg.sourceId, `${slug.replace(/[\\%_]/g, '\\$&')}/%`]);
     const sources = await ctx.engine.executeRaw<{ id: string; last_sync_at: string | Date | null }>(
       `SELECT id, last_sync_at FROM sources WHERE config->>'kind' = 'slack' AND config->>'s_channels_from' = 'initiatives' ORDER BY id`);
     return {
@@ -120,7 +123,7 @@ const initiative_status: Operation = {
       slack: { channels: slackChannelsOf(fm), released_at: fm.slack_released_at ?? null,
         sources: sources.map(s => ({ id: s.id, last_sync_at: s.last_sync_at })) },
       facts: { count: Number(count?.n ?? 0), recent: facts.map(f => ({ id: Number(f.id), fact: f.fact, kind: f.kind, valid_from: f.valid_from, provenance: f.context })) },
-      implements: ideas, targets,
+      implements: ideas, targets, docs: docs.map(d => ({ slug: d.slug, title: d.title })),
       merge: { status: fm.merge_status ?? null, merged_at: fm.merged_at ?? null },
     };
   },

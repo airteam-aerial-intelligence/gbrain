@@ -13,6 +13,10 @@ initiatives describe how they are about to change:
   into the target pages (facts added, replaced with the old kept as history, or
   withdrawn; new project pages created; a timeline entry linking back), and the
   ideas it implements are closed by the next `ideas` cycle phase.
+- Long design material (decision log, FAQ, worked examples) goes in supporting
+  pages under the initiative's slug with `type: initiative-doc`
+  (`initiatives/<slug>/<doc>`): neither a fact source nor a fact target, listed by
+  `initiative_status`.
 
 ```
 ideas/<slug>  ◀─implements─  initiatives/<slug>  ─targets─▶  projects/… concepts/…
