@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 315601,
-    "stdoutSha256": "248a38250fec01d926edf6ca516df2df8c8b4f12d68bf6252f761a3852863c72",
+    "stdoutBytes": 315597,
+    "stdoutSha256": "6f82e926aab811073f73f7633cf17571b181cacfaa9225ee05f4826b009af68e",
     "toolNames": [
       "remember",
       "entity",
@@ -5031,7 +5031,7 @@
         "scope": "admin"
       },
       {
-        "description": "Get job status and details by ID. Agent-scoped tokens (no admin) see only jobs they own.",
+        "description": "Get job status and details by ID. Remote callers see only jobs they submitted.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5055,7 +5055,7 @@
         "scope": "admin"
       },
       {
-        "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Agent-scoped tokens (no admin) wait only on jobs they own.",
+        "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Remote callers wait only on jobs they submitted.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5084,7 +5084,7 @@
         "scope": "admin"
       },
       {
-        "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope (agent-scoped tokens see only jobs they own).",
+        "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope; remote callers see only jobs they submitted (agent-scoped tokens too).",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5187,7 +5187,7 @@
         "scope": "admin"
       },
       {
-        "description": "Get structured progress for a running job. Agent-scoped tokens (no admin) see only jobs they own.",
+        "description": "Get structured progress for a running job. Remote callers see only jobs they submitted.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
