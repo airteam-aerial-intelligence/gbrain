@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 315660,
-    "stdoutSha256": "060fe043e8fe62fe20f0f1824d7d10ebbc62bc8d1088311178af1dc82d062ac5",
+    "stdoutBytes": 315734,
+    "stdoutSha256": "d3041d315d5962eab133452de8ce466ea2ada018fd8ad513f21bd5899335254f",
     "toolNames": [
       "remember",
       "entity",
