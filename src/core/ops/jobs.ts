@@ -176,7 +176,7 @@ const submit_job: Operation = {
   name: 'submit_job',
   idempotent: false,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: 'Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus any protected kind the host lists in jobs.remote_protected_allow (never shell; each such job runs under a spend cap). Other kinds require local CLI or a dedicated operation.',
+  description: 'Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus subagent when the host lists it in jobs.remote_protected_allow (it runs with your own access and visibility, under a spend cap; brain-wide maintenance kinds and shell are refused). Other kinds require local CLI or a dedicated operation.',
   params: {
     name: { type: 'string', required: true, description: 'Remote job type: sync, import, lint, or lint-fix. Local CLI also supports other registered types.' },
     data: { type: 'object', description: 'Remote sync accepts optional pull/noPull (one boolean); other remote jobs accept no parameters. Source and paths are derived from the grant.' },
@@ -197,11 +197,9 @@ const submit_job: Operation = {
     // Airteam fork: a protected name the host opened to remote admin callers skips the generic
     // remote-job path (sync/import/lint only) and is queued as trusted work under a spend cap.
     const remoteProtected = ctx.remote !== false && isProtectedJobName(name) && await remoteProtectedJobAllowed(ctx, name);
-    if (remoteProtected && (name === 'subagent' || name === 'subagent_aggregator')) {
-      // Keep the agent's tool calls in the caller's own write source.
-      const callerSource = ctx.auth?.sourceId ?? (typeof ctx.sourceId === 'string' && ctx.sourceId !== '__all__' ? ctx.sourceId : undefined);
-      if (callerSource) jobData.source_id = callerSource; else delete jobData.source_id;
-    }
+    // The job runs with the submitter's own access (remote-caller-authority.ts); unconfinable types are refused there.
+    const confined = remoteProtected ? await (await import('../minions/remote-caller-authority.ts')).prepareRemoteCallerJob(ctx, name, p.data) : undefined;
+    if (confined) jobData = confined.data;
     const remoteSubmission = ctx.remote !== false && !remoteProtected ? await prepareRemoteJob(ctx, name, p.data) : undefined;
     if (remoteSubmission) jobData = remoteSubmission.data;
     const translateAdmissionError = (e: unknown): never => {
@@ -243,7 +241,7 @@ const submit_job: Operation = {
     // name. Strict `=== false` so an untyped/cast context can't escalate.
     const trusted = remoteSubmission
       ? { submissionAuthority: remoteSubmission.authority }
-      : remoteProtected ? { allowProtectedSubmit: true, spendAuthorization: await remoteProtectedSpend(ctx, name, p.max_usd) }
+      : confined ? { submissionAuthority: confined.authority, allowProtectedSubmit: true, spendAuthorization: await remoteProtectedSpend(ctx, name, p.max_usd) }
       : ctx.remote === false && isProtectedJobName(name) ? { allowProtectedSubmit: true } : undefined;
 
     // v0.35.8.0: pre-enqueue shell-job validation, parity with the CLI submit

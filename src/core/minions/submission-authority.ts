@@ -15,10 +15,11 @@ import { isValidSourceId } from '../source-id.ts';
 import { parseStoredActor } from '../access/actor-model.ts';
 import { discoverGitRoot } from '../sync-git.ts';
 import type { MinionJob } from './types.ts';
+import { authorizeRemoteCallerExecution, parseRemoteCallerAuthority, type RemoteCallerAuthority } from './remote-caller-authority.ts';
 
 export const REMOTE_JOB_NAMES = ['sync', 'import', 'lint', 'lint-fix'] as const;
 export type RemoteJobName = typeof REMOTE_JOB_NAMES[number];
-export type SubmissionAuthority = { version: 1; kind: 'application' } | RemoteJobAuthority | RemoteAgentAuthority;
+export type SubmissionAuthority = { version: 1; kind: 'application' } | RemoteJobAuthority | RemoteAgentAuthority | RemoteCallerAuthority;
 export interface RemoteAgentAuthority {
   version: 1;
   kind: 'remote_agent';
@@ -103,6 +104,7 @@ export function parseSubmissionAuthority(value: unknown): SubmissionAuthority | 
   const a = record(value);
   if (a?.version !== 1) return null;
   if (a.kind === 'application') return APPLICATION_AUTHORITY;
+  if (a.kind === 'remote_caller') return parseRemoteCallerAuthority(a); // Airteam fork
   const p = record(a.principal), g = record(a.grant);
   if (a.kind === 'remote_agent') {
     if (p?.kind !== 'oauth_client' || typeof p.id !== 'string' || !p.id || !g ||
@@ -315,6 +317,7 @@ export async function authorizeJobExecution(engine: BrainEngine, job: Pick<Minio
   if (!a) deny('missing or unsupported submission authority; review locally with jobs authorize-legacy',
     'This queued job has no readable submission authority, so it does not run until reviewed. On the brain host, gbrain jobs authorize-legacy lists it for the user to approve or cancel.');
   if (a.kind === 'application') return a;
+  if (a.kind === 'remote_caller') { await authorizeRemoteCallerExecution(engine, a, job); return a; } // Airteam fork
   if (a.kind === 'remote_agent') {
     if (job.name !== 'subagent' || authorityDigest(job.data) !== a.payloadHash) deny('agent payload differs from its accepted grant',
       'This agent job\'s data changed after it was accepted, so it does not run. Submit a new agent job.');

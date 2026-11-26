@@ -26,6 +26,10 @@ import { DeniedModelError, isDeniedModel } from '../src/core/ai/model-deny.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { allowedJobModelOrDead } from '../src/core/minions/denied-model.ts';
 import { UnrecoverableError } from '../src/core/minions/types.ts';
+import { buildBrainTools } from '../src/core/minions/tools/brain-allowlist.ts';
+import { APPLICATION_AUTHORITY, parseSubmissionAuthority, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
+import { mintLegacyToken } from '../src/core/token-mint.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 
 const HOST = 'openai:gpt-6.1-sol';
 const OTHER = 'openai:gpt-5.5';
@@ -52,11 +56,14 @@ async function remoteThink(params: Record<string, unknown>, scopes: string[] = [
   return { isError: out.isError === true, body, text, codes: notices.map(n => n.code) };
 }
 
-function jobCtx(scopes: string[] = ['read', 'write', 'admin']): OperationContext {
+let gw: { id: string };
+/** A remote call from the gateway's legacy token (read default only), optionally naming an end user. */
+function jobCtx(scopes: string[] = ['read', 'write', 'admin'], endUser?: string): OperationContext {
   return {
     engine, config: {} as OperationContext['config'], dryRun: false, remote: true, sourceId: 'default', transport: 'http',
     logger: { info() {}, warn() {}, error() {} },
-    auth: { token: 'test-only', principal: { kind: 'legacy_token', id: 'gw' }, scopes, sourceId: 'default' },
+    auth: { token: 'test-only', clientId: gw.id, principal: { kind: 'legacy_token', id: gw.id }, scopes, sourceId: 'default', allowedSources: ['default'] },
+    ...(endUser ? { endUser } : {}),
   } as OperationContext;
 }
 const submitJob = (ctx: OperationContext, p: Record<string, unknown>) => jobsOperations.find(op => op.name === 'submit_job')!.handler(ctx, p);
@@ -66,6 +73,11 @@ beforeAll(async () => {
   await engine.connect({ engine: 'pglite' } as never);
   await engine.initSchema();
   await engine.setConfig('models.think', HOST);
+  gw = await mintLegacyToken(engine, { name: 'gateway', takesHolders: ['world'], scopes: ['read', 'write', 'admin'] });
+  await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('secret', 'secret') ON CONFLICT (id) DO NOTHING");
+  await importFromContent(engine, 'notes/open-plan', '---\ntype: note\ntitle: Open plan\n---\n# Open plan\n\nopen canary.', { sourceId: 'default', noEmbed: true });
+  await importFromContent(engine, 'notes/secret-plan', '---\ntype: note\ntitle: Secret plan\n---\n# Secret plan\n\nsecret canary.', { sourceId: 'secret', noEmbed: true });
+  await importFromContent(engine, 'notes/members-only', '---\ntype: note\ntitle: Members only\nreadable_by: [alice-example]\n---\n# Members only\n\nmembers-only canary.', { sourceId: 'default', noEmbed: true });
 }, 120_000);
 afterEach(async () => {
   __setGenerateTextTransportForTests(null);
@@ -180,20 +192,34 @@ describe('remote submit_job of protected names', () => {
     await expect(submitJob(jobCtx(), { name: 'synthesize', data: {} })).rejects.toThrow();
   });
 
-  test('configured names are accepted for an admin caller, with a capped spend authorization', async () => {
+  test('a listed subagent is accepted under the confined remote_caller authority, capped and stripped of trusted fields', async () => {
     await engine.setConfig('jobs.remote_protected_allow', 'subagent,synthesize');
     await engine.setConfig('jobs.remote_max_usd', '3');
-    const sub = await submitJob(jobCtx(), { name: 'subagent', data: { prompt: 'x', source_id: 'other' }, max_usd: 10 }) as { id: number };
+    const sub = await submitJob(jobCtx(undefined, 'alice@example.com'), { name: 'subagent', max_usd: 10, data: {
+      prompt: 'x', source_id: 'other', brain_id: 'other-brain', stage_writes: true, mode: 'oneshot', __owner_client_id: 'someone-else',
+      allowed_tools: ['brain_get_page', 'search', 'submit_job'],
+    } }) as { id: number };
     const row = await new MinionQueue(engine).getJob(sub.id);
     expect(row?.name).toBe('subagent');
     expect(row?.data.source_id).toBe('default');
+    for (const k of ['brain_id', 'stage_writes', 'mode', '__owner_client_id']) expect(row?.data[k]).toBeUndefined();
+    expect(row?.data.allowed_tools).toEqual(['get_page', 'search']);
     expect(row?.spend_authorization?.cap_usd).toBe(3);
-    const syn = await submitJob(jobCtx(), { name: 'synthesize', data: {}, max_usd: 1 }) as { id: number };
-    expect((await new MinionQueue(engine).getJob(syn.id))?.spend_authorization?.cap_usd).toBe(1);
-    // unlisted protected name stays refused
-    await expect(submitJob(jobCtx(), { name: 'patterns', data: {} })).rejects.toThrow();
-    // non-admin caller stays refused
+    const a = row?.submission_authority as { kind: string; principal: { kind: string; id: string }; grant: { owner: string; endUser?: string } };
+    expect(a.kind).toBe('remote_caller');
+    expect(a.principal).toEqual({ kind: 'legacy_token', id: gw.id });
+    expect(a.grant.owner).toBe(`legacy_token:${gw.id}|end_user:alice@example.com`);
+    expect(a.grant.endUser).toBe('alice@example.com');
+  });
+
+  test('brain-wide maintenance kinds are refused even when listed (they cannot run with the caller\'s visibility)', async () => {
+    await engine.setConfig('jobs.remote_protected_allow', '*');
+    for (const name of ['synthesize', 'patterns', 'consolidate']) {
+      await expect(submitJob(jobCtx(), { name, data: {} })).rejects.toThrow(/cannot be confined/);
+    }
     await expect(submitJob(jobCtx(['read', 'write']), { name: 'subagent', data: { prompt: 'x' } })).rejects.toThrow();
+    const [{ n }] = await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM minion_jobs');
+    expect(n).toBe(0);
   });
 
   test("shell stays refused remotely even with '*' or an explicit listing", async () => {
@@ -206,5 +232,60 @@ describe('remote submit_job of protected names', () => {
   test('a remotely submitted subagent naming Fable is refused', async () => {
     await engine.setConfig('jobs.remote_protected_allow', '*');
     await expect(submitJob(jobCtx(), { name: 'subagent', data: { prompt: 'x', model: 'claude-cli:claude-fable-5' } })).rejects.toBeInstanceOf(DeniedModelError);
+  });
+});
+
+describe('a confined remote job runs with the submitter\'s visibility', () => {
+  async function confinedAuthority(endUser?: string) {
+    await engine.setConfig('jobs.remote_protected_allow', 'subagent');
+    const { id } = await submitJob(jobCtx(undefined, endUser), { name: 'subagent', data: { prompt: 'x' } }) as { id: number };
+    const row = await new MinionQueue(engine).getJob(id);
+    return { id, authority: parseSubmissionAuthority(row?.submission_authority)! };
+  }
+  const tool = (name: string) => buildBrainTools({ subagentId: 1, engine, config: {} as never, sourceId: 'secret' }).find(t => t.name === `brain_${name}`)!;
+  const tc = () => ({ engine, jobId: 1 }) as never;
+
+  test('its agent cannot read a source or a member-restricted page the submitting credential cannot; local work still can', async () => {
+    const { authority } = await confinedAuthority();
+    const open = await withSubmissionAuthority(authority, () => tool('get_page').execute({ slug: 'notes/open-plan' }, tc())) as { slug?: string };
+    expect(open.slug).toBe('notes/open-plan');
+    await expect(withSubmissionAuthority(authority, () => tool('get_page').execute({ slug: 'notes/secret-plan', source_id: 'secret' }, tc()))).rejects.toThrow();
+    const restricted = await withSubmissionAuthority(authority, () => tool('get_page').execute({ slug: 'notes/members-only' }, tc())).catch(e => e);
+    expect(JSON.stringify(restricted)).not.toContain('members-only canary');
+    // The same tool in a local (application) job reads the other source: the confinement comes from the authority.
+    const local = await withSubmissionAuthority(APPLICATION_AUTHORITY, () => tool('get_page').execute({ slug: 'notes/secret-plan', source_id: 'secret' }, tc())) as { slug?: string };
+    expect(local.slug).toBe('notes/secret-plan');
+  });
+
+  test('a tool the credential\'s scope does not cover is refused', async () => {
+    const { authority } = await confinedAuthority();
+    const narrowed = { ...authority, grant: { ...(authority as { grant: object }).grant, scopes: ['read'] } } as typeof authority;
+    await expect(withSubmissionAuthority(narrowed, () => tool('put_page').execute({ slug: 'notes/x', content: '# x' }, tc()))).rejects.toThrow(/write scope/);
+  });
+
+  test('a descendant inherits the parent authority and spend group; another type or authority is refused', async () => {
+    const { id, authority } = await confinedAuthority('alice@example.com');
+    const queue = new MinionQueue(engine);
+    const child = await withSubmissionAuthority(authority, () => queue.add('subagent', { prompt: 'child', brain_id: 'x' }, { parent_job_id: id }));
+    const parent = await queue.getJob(id);
+    expect(child.submission_authority?.kind).toBe('remote_caller');
+    expect((child.submission_authority as { grant: { owner: string } }).grant.owner).toBe((authority as { grant: { owner: string } }).grant.owner);
+    expect(child.data.brain_id).toBeUndefined();
+    expect(child.spend_authorization?.group_id).toBe(parent?.spend_authorization?.group_id);
+    await expect(withSubmissionAuthority(authority, () => queue.add('synthesize', {}, { parent_job_id: id }))).rejects.toThrow(/cannot submit/);
+    await expect(withSubmissionAuthority(authority, () => queue.add('subagent', { prompt: 'y' }, { parent_job_id: id }, { submissionAuthority: APPLICATION_AUTHORITY }))).rejects.toThrow(/another authority/);
+  });
+
+  test('job reads: another end user behind the same credential sees nothing; the submitter sees its job and prompt', async () => {
+    const { id } = await confinedAuthority('alice@example.com');
+    const get = jobsOperations.find(op => op.name === 'get_job')!;
+    const list = jobsOperations.find(op => op.name === 'list_jobs')!;
+    const alice = jobCtx(undefined, 'alice@example.com');
+    const bob = jobCtx(undefined, 'bob@example.com');
+    expect(((await get.handler(alice, { id })) as { data: { prompt: string } }).data.prompt).toBe('x');
+    await expect(get.handler(bob, { id })).rejects.toThrow(/not found/i);
+    expect((await list.handler(bob, {})) as unknown[]).toEqual([]);
+    const local = { ...alice, remote: false, auth: undefined } as OperationContext;
+    expect(((await list.handler(local, {})) as unknown[]).length).toBe(1);
   });
 });

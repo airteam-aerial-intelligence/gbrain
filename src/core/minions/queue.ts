@@ -233,7 +233,9 @@ export class MinionQueue {
     // Normalize first so the protected-name check and the insert use the same
     // canonical form. Without the trim-before-check, `queue.add(' shell ', ...)`
     // would evade the guard and insert a job literally named 'shell'.
-    if (currentSubmissionAuthority() && currentSubmissionAuthority()!.kind !== 'application') throw new Error('Remote jobs cannot submit descendant jobs');
+    const parentAuthority = currentSubmissionAuthority();
+    if (parentAuthority?.kind === 'remote_caller') ({ data, trusted } = await (await import('./remote-caller-authority.ts')).inheritRemoteCallerSubmit(this.engine, parentAuthority, name, data, opts, trusted)); // Airteam fork: children inherit, never widen
+    else if (parentAuthority && parentAuthority.kind !== 'application') throw new Error('Remote jobs cannot submit descendant jobs');
     // #7240: Postgres refuses a lone UTF-16 surrogate or U+0000 anywhere in a JSONB value, which failed the whole insert.
     if (data !== undefined) data = jsonbSafeJson(data);
     const authority = parseSubmissionAuthority(trusted?.submissionAuthority ?? APPLICATION_AUTHORITY);
@@ -565,7 +567,7 @@ export class MinionQueue {
           throw new Error(`parent_job_id ${opts.parent_job_id} not found`);
         }
         const parent = rowToMinionJob(parentRows[0]);
-        if (parent.submission_authority && parent.submission_authority.kind !== 'application') throw new Error('Remote jobs cannot have descendants');
+        if (parent.submission_authority && parent.submission_authority.kind !== 'application' && !(parent.submission_authority.kind === 'remote_caller' && authority.kind === 'remote_caller')) throw new Error('Remote jobs cannot have descendants');
         if (!NON_TERMINAL_STATUSES.includes(parent.status)) throw new Error(`parent job ${opts.parent_job_id} is ${parent.status}; a finished job cannot get new children`);
 
         depth = parent.depth + 1;

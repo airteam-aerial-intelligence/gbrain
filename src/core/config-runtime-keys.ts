@@ -15,7 +15,7 @@ export const RUNTIME_READER_CONFIG_KEYS: readonly string[] = [
   'think.remote_models', // ops/takes.ts (GBRA-437): comma-separated models a remote think may pick; default empty, so remote callers get the host think model; '*' = any model the host can run (Airteam fork)
   'think.remote_max_rounds', // ops/takes.ts (Airteam fork): max rounds a remote think may run, default 1, ceiling 10
   'think.remote_persist', // ops/takes.ts (Airteam fork): remote write-scoped callers may persist think save/take, default off
-  'jobs.remote_protected_allow', // ops/jobs.ts (Airteam fork): comma-separated protected job names (or '*') remote admin callers may submit_job; never shell; default empty
+  'jobs.remote_protected_allow', // ops/jobs.ts (Airteam fork): comma-separated protected job names (or '*') remote admin callers may submit_job; only confinable types (subagent) are accepted, each running with the submitter's own access (minions/remote-caller-authority.ts); never shell; default empty
   'jobs.remote_max_usd', // ops/jobs.ts (Airteam fork): spend cap per remotely submitted protected job, default 5 (USD)
   'cycle.grade_takes.auto_resolve.enabled', // cycle/grade-takes.ts: apply verdicts at or above the 0.95 confidence threshold, default off (#7542)
   'embedding_image_ocr_max_images', 'embedding_image_ocr_max_usd', // import-file.ts image-OCR per-run caps, default 200 images / $1

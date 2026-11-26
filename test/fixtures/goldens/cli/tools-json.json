@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 315597,
-    "stdoutSha256": "6f82e926aab811073f73f7633cf17571b181cacfaa9225ee05f4826b009af68e",
+    "stdoutBytes": 315660,
+    "stdoutSha256": "060fe043e8fe62fe20f0f1824d7d10ebbc62bc8d1088311178af1dc82d062ac5",
     "toolNames": [
       "remember",
       "entity",
@@ -4967,7 +4967,7 @@
         "scope": "read"
       },
       {
-        "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus any protected kind the host lists in jobs.remote_protected_allow (never shell; each such job runs under a spend cap). Other kinds require local CLI or a dedicated operation.",
+        "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus subagent when the host lists it in jobs.remote_protected_allow (it runs with your own access and visibility, under a spend cap; brain-wide maintenance kinds and shell are refused). Other kinds require local CLI or a dedicated operation.",
         "idempotent": false,
         "local_only": false,
         "mutating": true,

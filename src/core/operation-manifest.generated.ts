@@ -4252,7 +4252,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus any protected kind the host lists in jobs.remote_protected_allow (never shell; each such job runs under a spend cap). Other kinds require local CLI or a dedicated operation.",
+    "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus subagent when the host lists it in jobs.remote_protected_allow (it runs with your own access and visibility, under a spend cap; brain-wide maintenance kinds and shell are refused). Other kinds require local CLI or a dedicated operation.",
     "params": {
       "name": {
         "type": "string",
