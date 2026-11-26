@@ -584,12 +584,25 @@ CREATE TABLE IF NOT EXISTS chat_usage_log (
   output_tokens      INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
   cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-  cost_usd           DOUBLE PRECISION
+  cost_usd           DOUBLE PRECISION,
+  kind               TEXT,
+  operation          TEXT,
+  job_id             BIGINT,
+  job_name           TEXT,
+  op                 TEXT,
+  caller             TEXT,
+  cli_command        TEXT,
+  latency_ms         INTEGER,
+  outcome            TEXT,
+  transport          TEXT,
+  error_class        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
   ON chat_usage_log (created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_usage_log_model
   ON chat_usage_log (model, created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_usage_log_job
+  ON chat_usage_log (job_id) WHERE job_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS open_loops (
   id                 BIGSERIAL PRIMARY KEY,

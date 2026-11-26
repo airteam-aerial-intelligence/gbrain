@@ -1,12 +1,12 @@
 /**
  * #4218 — chat usage accounting (revives the #3392 shape).
  *
- * Pins the full loop: gateway.chat() success boundary → recordChatUsage →
+ * Pins the full loop: gateway.chat() provider call → usage observer → recordProviderCall →
  * phase attribution (direct vs job callers) → canonical cost math incl.
  * cache tokens → engine sink INSERT into chat_usage_log (migration v140) →
  * the admin-scope get_usage op with explicit coverage fields (admin: the
  * ledger has no source dimension, so source-scoped read tokens are fenced). Failure paths:
- * a failed chat writes NO row; a throwing sink never breaks a chat call;
+ * a failed chat writes one outcome=error row with cost NULL; a throwing sink never breaks a chat call;
  * unknown-pricing models record cost_usd NULL (never a fake 0).
  */
 
@@ -27,6 +27,7 @@ import {
   setChatUsageSink,
   registerChatUsageSink,
   recordChatUsage,
+  recordProviderCall,
   estimateChatCostUsd,
   makeEngineChatUsageSink,
   type ChatCallMeter,
@@ -52,7 +53,8 @@ afterEach(() => {
 });
 
 describe('#4480 — sink registry: multi-engine deregistration restores the prior ledger', () => {
-  const usage = { input_tokens: 1, output_tokens: 1 };
+  // Rows come from recordProviderCall (the usage observer's single writer).
+  const row: ChatUsageRecord = { model: 'anthropic:claude-haiku-4-5', provider: 'anthropic', phase: null, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: null };
 
   test('records route to the top live sink; deregistering it restores the previous one', () => {
     const primary: ChatUsageRecord[] = [];
@@ -60,7 +62,7 @@ describe('#4480 — sink registry: multi-engine deregistration restores the prio
     const deregPrimary = registerChatUsageSink((r) => { primary.push(r); });
     const deregSecondary = registerChatUsageSink((r) => { secondary.push(r); });
 
-    recordChatUsage({ model: 'anthropic:claude-haiku-4-5', usage });
+    recordProviderCall(row);
     expect(secondary.length).toBe(1);
     expect(primary.length).toBe(0);
 
@@ -68,13 +70,13 @@ describe('#4480 — sink registry: multi-engine deregistration restores the prio
     // scalar) the ledger was permanently lost to the closed engine; now the
     // primary sink is restored.
     deregSecondary();
-    recordChatUsage({ model: 'anthropic:claude-haiku-4-5', usage });
+    recordProviderCall(row);
     expect(primary.length).toBe(1);
     expect(secondary.length).toBe(1);
 
     deregPrimary();
     // No live sink: record is a silent no-op (never throws).
-    recordChatUsage({ model: 'anthropic:claude-haiku-4-5', usage });
+    recordProviderCall(row);
     expect(primary.length).toBe(1);
     // Deregistration is idempotent.
     deregSecondary();
@@ -90,10 +92,10 @@ describe('#4480 — sink registry: multi-engine deregistration restores the prio
     const deregC = registerChatUsageSink((r) => { c.push(r); });
     // Middle entry disconnects first — top stays the router.
     deregB();
-    recordChatUsage({ model: 'anthropic:claude-haiku-4-5', usage });
+    recordProviderCall(row);
     expect(c.length).toBe(1);
     deregC();
-    recordChatUsage({ model: 'anthropic:claude-haiku-4-5', usage });
+    recordProviderCall(row);
     expect(a.length).toBe(1);
     expect(b.length).toBe(0);
     deregA();
@@ -103,7 +105,7 @@ describe('#4480 — sink registry: multi-engine deregistration restores the prio
     const a: ChatUsageRecord[] = [];
     registerChatUsageSink((r) => { a.push(r); });
     setChatUsageSink(null);
-    recordChatUsage({ model: 'anthropic:claude-haiku-4-5', usage });
+    recordProviderCall(row);
     expect(a.length).toBe(0);
   });
 });
@@ -158,12 +160,24 @@ describe('#5506: chat call meter prices what it counts', () => {
     expect(meter.cost_usd).toBeCloseTo(2 * estimateChatCostUsd(PRICED, usage)!, 12);
   });
 
-  test('the sink record carries the same cost the meter added', () => {
+  test('the ledger row carries the same cost the meter added', async () => {
+    const records: ChatUsageRecord[] = [];
+    setChatUsageSink((r) => { records.push(r); });
+    __setChatTransportForTests(async () => fakeResult());
+    const meter: ChatCallMeter = { calls: 0, cost_usd: 0, unpriced_calls: 0 };
+    await withChatCallMeter(meter, () => chat({ model: PRICED, messages: [{ role: 'user', content: 'hi' }] }));
+    expect(meter.calls).toBe(1);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.cost_usd).toBeCloseTo(meter.cost_usd!, 12);
+  });
+
+  test('recordChatUsage feeds the meter only; it never writes a ledger row (no double count)', () => {
     const records: ChatUsageRecord[] = [];
     setChatUsageSink((r) => { records.push(r); });
     const meter: ChatCallMeter = { calls: 0, cost_usd: 0, unpriced_calls: 0 };
     meterCalls(meter, [PRICED, UNPRICED]);
-    expect(records.map(r => r.cost_usd)).toEqual([meter.cost_usd!, null]);
+    expect(meter.calls).toBe(2);
+    expect(records).toEqual([]);
   });
 
   test('the meter prices with the budget tracker resolver: overrides, the claude-cli sibling rate and free local models', () => {
@@ -229,7 +243,7 @@ describe('gateway.chat() success boundary — direct vs job callers', () => {
     );
   });
 
-  test('failed chat writes NO usage row and the error propagates', async () => {
+  test('failed chat writes one error row (0 tokens, cost NULL) and the error propagates', async () => {
     const records: ChatUsageRecord[] = [];
     setChatUsageSink((r) => {
       records.push(r);
@@ -241,7 +255,8 @@ describe('gateway.chat() success boundary — direct vs job callers', () => {
       chat({ model: 'anthropic:claude-haiku-4-5', messages: [{ role: 'user', content: 'hi' }] }),
     ).rejects.toThrow('provider exploded');
     await new Promise((r) => setTimeout(r, 10));
-    expect(records.length).toBe(0);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ model: 'anthropic:claude-haiku-4-5', kind: 'chat', operation: 'gateway.chat', outcome: 'error', input_tokens: 0, output_tokens: 0, cost_usd: null });
   });
 
   test('a throwing sink never breaks a chat call (fail-open)', async () => {
@@ -355,7 +370,7 @@ describe('engine sink + get_usage op (PGLite, migration v140 schema)', () => {
     expect(jobPhase.calls).toBe(1);
 
     // Coverage honesty contract.
-    expect(out.coverage.source).toBe('gateway.chat');
+    expect(out.coverage.source).toBe('all provider calls');
     expect(out.coverage.table_present).toBe(true);
     expect(out.coverage.logged_since).not.toBeNull();
     expect(out.coverage.priced_calls).toBe(2);

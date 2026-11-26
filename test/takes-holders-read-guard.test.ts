@@ -12,8 +12,13 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = join(import.meta.dir, '..');
-/** readHolders itself, and the write authority, whose fill stays [world] for every remote caller. */
-const ALLOWED = new Set(['src/core/ops/context.ts', 'src/core/persistence/authority.ts']);
+/**
+ * readHolders itself, and the write authority, whose fill stays [world] for every remote caller. Airteam fork:
+ * remote-caller-tool.ts reads the field only to NARROW it (narrowHolders: intersection with the submitting
+ * credential's list, never a widening; with no list it leaves the field unset so readHolders' default applies).
+ * Pinned by the narrowHolders test in test/airteam-remote-think-jobs-fable.test.ts.
+ */
+const ALLOWED = new Set(['src/core/ops/context.ts', 'src/core/persistence/authority.ts', 'src/core/minions/remote-caller-tool.ts']);
 const RAW_READ = /\b(?:ctx|context|opCtx|operationContext)\??\.takesHoldersAllowList\b/;
 
 function sourceFiles(dir: string): string[] {

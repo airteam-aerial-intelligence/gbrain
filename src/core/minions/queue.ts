@@ -14,7 +14,7 @@ import type {
   MinionJob, MinionJobInput, MinionJobStatus, InboxMessage, TokenUpdate,
   MinionQueueOpts, ChildDoneMessage, ChildOutcome, Attachment, AttachmentInput,
 } from './types.ts';
-import { rowToMinionJob, rowToInboxMessage, rowToAttachment, jobActorSql, NO_JOB_ACTOR, type JobActor } from './types.ts';
+import { rowToMinionJob, rowToInboxMessage, rowToAttachment, jobActorSql, jobOwnerSql, NO_JOB_ACTOR, type JobActor } from './types.ts';
 import { WATCHDOG_SUSPECT_MARK, markedJobSql, releaseWatchdogClaim, requeueCoRunnerStalls, unmarkedJobSql } from './watchdog-attribution.ts';
 export { WATCHDOG_SUSPECT_MARK } from './watchdog-attribution.ts';
 import { coalesceOnIdempotencyKey, decideCoalesce, insertOrCoalesce } from './idempotency-coalesce.ts';
@@ -233,7 +233,9 @@ export class MinionQueue {
     // Normalize first so the protected-name check and the insert use the same
     // canonical form. Without the trim-before-check, `queue.add(' shell ', ...)`
     // would evade the guard and insert a job literally named 'shell'.
-    if (currentSubmissionAuthority() && currentSubmissionAuthority()!.kind !== 'application') throw new Error('Remote jobs cannot submit descendant jobs');
+    const parentAuthority = currentSubmissionAuthority();
+    if (parentAuthority?.kind === 'remote_caller') ({ data, trusted } = await (await import('./remote-caller-authority.ts')).inheritRemoteCallerSubmit(this.engine, parentAuthority, name, data, opts, trusted)); // Airteam fork: children inherit, never widen
+    else if (parentAuthority && parentAuthority.kind !== 'application') throw new Error('Remote jobs cannot submit descendant jobs');
     // #7240: Postgres refuses a lone UTF-16 surrogate or U+0000 anywhere in a JSONB value, which failed the whole insert.
     if (data !== undefined) data = jsonbSafeJson(data);
     const authority = parseSubmissionAuthority(trusted?.submissionAuthority ?? APPLICATION_AUTHORITY);
@@ -261,7 +263,7 @@ export class MinionQueue {
     // (no tools, loop declared unsupported, or unknown provider). The handler
     // (`subagent.ts`) does a defense-in-depth check at dispatch time too.
     if (jobName === 'subagent' && data && typeof data === 'object') {
-      const submittedModel = (data as { model?: unknown }).model;
+      const submittedModel = (await import('../ai/model-deny.ts')).assertModelAllowed((data as { model?: unknown }).model, 'subagent job data.model'); // Airteam fork: Fable ban
       if (typeof submittedModel === 'string' && submittedModel.length > 0) {
         const { classifyCapabilities } = await import('../ai/capabilities.ts');
         const verdict = classifyCapabilities(submittedModel);
@@ -565,7 +567,7 @@ export class MinionQueue {
           throw new Error(`parent_job_id ${opts.parent_job_id} not found`);
         }
         const parent = rowToMinionJob(parentRows[0]);
-        if (parent.submission_authority && parent.submission_authority.kind !== 'application') throw new Error('Remote jobs cannot have descendants');
+        if (parent.submission_authority && parent.submission_authority.kind !== 'application' && !(parent.submission_authority.kind === 'remote_caller' && authority.kind === 'remote_caller')) throw new Error('Remote jobs cannot have descendants');
         if (!NON_TERMINAL_STATUSES.includes(parent.status)) throw new Error(`parent job ${opts.parent_job_id} is ${parent.status}; a finished job cannot get new children`);
 
         depth = parent.depth + 1;
@@ -740,7 +742,7 @@ export class MinionQueue {
       params.push(opts.name);
     }
     if (opts?.ownerClientId) {
-      conditions.push(`data->>'__owner_client_id' = $${idx++}`);
+      conditions.push(`${jobOwnerSql()} = $${idx++}`);
       params.push(opts.ownerClientId);
     }
 
@@ -1062,7 +1064,7 @@ export class MinionQueue {
           SELECT id, 0 AS d FROM minion_jobs
            WHERE id = ANY($1::int[])
              AND ($3::text[] IS NULL OR status = ANY($3::text[]))
-             AND ($4::text IS NULL OR (data->>'__owner_client_id' = $4::text AND ${jobActorSql(5)}))
+             AND ($4::text IS NULL OR (${jobOwnerSql()} = $4::text AND ${jobActorSql(5)}))
           UNION ALL
           SELECT m.id, descendants.d + 1
             FROM minion_jobs m

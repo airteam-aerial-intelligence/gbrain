@@ -42,6 +42,7 @@ import {
   sweepDeadClaudeCliScratchDirs,
 } from './claude-cli-scratch.ts';
 import { continuationUnprovenMetadata, resolveClaudeCliAnswer } from './claude-cli-continuation.ts';
+import { assertModelAllowed } from '../model-deny.ts';
 import type {
   LanguageModelV2,
   LanguageModelV2CallOptions,
@@ -780,6 +781,7 @@ export class ClaudeCliLanguageModel implements LanguageModelV2 {
     const toolInstructions = buildToolUseInstructions(options.tools);
     const systemPrompt = [systemText, toolInstructions].filter(s => s.length > 0).join('\n');
 
+    assertModelAllowed(this.modelId, 'claude-cli');
     const result = await runClaude(systemPrompt, userBlocks, this.modelId, options.abortSignal, options.maxOutputTokens);
     // The CLI reports Anthropic's separate buckets; LanguageModelV2Usage wants
     // the TOTAL input with the cache read as a subset (what every SDK provider

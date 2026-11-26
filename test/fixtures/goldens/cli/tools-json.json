@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 315246,
-    "stdoutSha256": "ff9e30969bf3da4102cd3eee4f54c18934c051cbf58d9efb4465039646a83c80",
+    "stdoutBytes": 315734,
+    "stdoutSha256": "d3041d315d5962eab133452de8ce466ea2ada018fd8ad513f21bd5899335254f",
     "toolNames": [
       "remember",
       "entity",
@@ -4400,7 +4400,7 @@
         "scope": "read"
       },
       {
-        "description": "Aggregate chat usage + cost from the chat_usage_log ledger (per-model and per-phase token counts, cache reads/writes, USD estimates) with explicit coverage fields.",
+        "description": "Aggregate usage + cost of all provider calls (chat, expansion, embedding, rerank, subagent) from the chat_usage_log ledger (per-model, per-phase and per-kind token counts, cache reads/writes, USD estimates) with explicit coverage fields.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -4967,7 +4967,7 @@
         "scope": "read"
       },
       {
-        "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source. Other kinds require local CLI or a dedicated operation.",
+        "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus subagent when the host lists it in jobs.remote_protected_allow (it runs with your own access and visibility, under a spend cap; brain-wide maintenance kinds and shell are refused). Other kinds require local CLI or a dedicated operation.",
         "idempotent": false,
         "local_only": false,
         "mutating": true,
@@ -4977,6 +4977,7 @@
           "delay": "number?",
           "lock_duration_ms": "number?",
           "max_attempts": "number?",
+          "max_usd": "number?",
           "name": "string",
           "priority": "number?",
           "queue": "string?",
@@ -4999,6 +5000,10 @@
             },
             "max_attempts": {
               "description": "Max retry attempts (default: 3)",
+              "type": "number"
+            },
+            "max_usd": {
+              "description": "Remote protected jobs only: spend cap in USD for this job; never above the host cap jobs.remote_max_usd (default 5).",
               "type": "number"
             },
             "name": {
@@ -5026,7 +5031,7 @@
         "scope": "admin"
       },
       {
-        "description": "Get job status and details by ID. Agent-scoped tokens (no admin) see only jobs they own.",
+        "description": "Get job status and details by ID. Remote callers see only jobs they submitted.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5050,7 +5055,7 @@
         "scope": "admin"
       },
       {
-        "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Agent-scoped tokens (no admin) wait only on jobs they own.",
+        "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Remote callers wait only on jobs they submitted.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5079,7 +5084,7 @@
         "scope": "admin"
       },
       {
-        "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope (agent-scoped tokens see only jobs they own).",
+        "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope; remote callers see only jobs they submitted (agent-scoped tokens too).",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -5182,7 +5187,7 @@
         "scope": "admin"
       },
       {
-        "description": "Get structured progress for a running job. Agent-scoped tokens (no admin) see only jobs they own.",
+        "description": "Get structured progress for a running job. Remote callers see only jobs they submitted.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,

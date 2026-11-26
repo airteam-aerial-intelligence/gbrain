@@ -286,6 +286,10 @@ async function countMcpResolved(ctx: OperationContext): Promise<number> {
 
 /** runThink names the CLI flag; op callers get the param on their own surface and a caller-class code. */
 function thinkModelError(ctx: OperationContext, e: unknown): unknown {
+  if (e instanceof Error && e.name === 'DeniedModelError') {
+    return opError('invalid_params', `think: ${e.message}`,
+      'Nothing was synthesized. Fable models are banned on this brain; omit `model` to use the configured think model, or pass another model.');
+  }
   if (e instanceof Error && e.name === 'ReferenceDateError') {
     return opError('invalid_params', `think: ${e.message}`,
       `Nothing was synthesized. Pass ${opTransport(ctx) === 'cli' ? paramUse(ctx, 'reference_date') : '`reference_date`'} as a past or current YYYY-MM-DD, or omit it to use today in brain.timezone.`);
@@ -298,6 +302,24 @@ function thinkModelError(ctx: OperationContext, e: unknown): unknown {
 }
 
 export const THINK_REMOTE_MODELS_KEY = 'think.remote_models';
+/** Airteam fork: max rounds a remote think may run (default 1 = upstream behavior). */
+export const THINK_REMOTE_MAX_ROUNDS_KEY = 'think.remote_max_rounds';
+/** Airteam fork: true lets a remote caller holding the write scope persist save/take (default false = upstream behavior). */
+export const THINK_REMOTE_PERSIST_KEY = 'think.remote_persist';
+
+/** Remote rounds: clamp the caller's request to think.remote_max_rounds (unset/invalid → 1). */
+async function remoteThinkRounds(engine: OperationContext['engine'], requested: unknown): Promise<number> {
+  const raw = Number.parseInt((await engine.getConfig(THINK_REMOTE_MAX_ROUNDS_KEY)) ?? '', 10);
+  const max = Number.isSafeInteger(raw) && raw >= 1 ? Math.min(raw, 10) : 1;
+  const want = typeof requested === 'number' && Number.isFinite(requested) ? Math.floor(requested) : 1;
+  return Math.max(1, Math.min(want, max));
+}
+
+/** Remote save/take: only with think.remote_persist=true AND a write-scoped caller. */
+async function remoteThinkMayPersist(ctx: OperationContext): Promise<boolean> {
+  const [{ isConfigTruthy }, { hasScope }] = await Promise.all([import('../config.ts'), import('../scope.ts')]);
+  return isConfigTruthy(await ctx.engine.getConfig(THINK_REMOTE_PERSIST_KEY)) && hasScope(ctx.auth?.scopes ?? [], 'write');
+}
 
 /**
  * GBRA-437: a remote caller's think model. The host's own think model and any model the host
@@ -311,7 +333,9 @@ async function remoteThinkModel(engine: OperationContext['engine'], requested: s
   const resolve = async (cliFlag?: string) => normalizeModelId(await resolveModel(engine, { cliFlag, configKey: 'models.think', tier: 'deep', fallback: 'opus' }));
   const [wanted, host, listed] = await Promise.all([resolve(requested), resolve(), engine.getConfig(THINK_REMOTE_MODELS_KEY)]);
   if (wanted === host) return {};
-  const allowed = await Promise.all((listed ?? '').split(',').map(m => m.trim()).filter(Boolean).map(m => resolve(m)));
+  const entries = (listed ?? '').split(',').map(m => m.trim()).filter(Boolean);
+  // Airteam fork: '*' lets a remote caller pick any model the host can run (banned models already threw in resolve()).
+  const allowed = entries.includes('*') ? [wanted] : await Promise.all(entries.map(m => resolve(m)));
   if (!allowed.includes(wanted)) return { ignored: 'not_allowed' };
   return probeChatModel(wanted).ok && isAvailable('chat', wanted) ? { model: wanted } : { ignored: 'unusable' };
 }
@@ -338,9 +362,11 @@ const think: Operation = {
   mutating: true,
   handler: async (ctx, p) => {
     const remote = ctx.remote ?? true;
-    // Codex P1 #7 + privacy: remote callers cannot persist via MCP.
-    const safeSave = remote ? false : Boolean(p.save);
-    const safeTake = remote ? false : Boolean(p.take);
+    // Codex P1 #7 + privacy: remote callers cannot persist via MCP, unless the
+    // host opts in (Airteam fork: think.remote_persist + write scope).
+    const remotePersist = remote && (Boolean(p.save) || Boolean(p.take)) ? await remoteThinkMayPersist(ctx) : false;
+    const safeSave = remote && !remotePersist ? false : Boolean(p.save);
+    const safeTake = remote && !remotePersist ? false : Boolean(p.take);
     // v0.40.2.0: thread source-scope scalars + remote flag for trajectory
     // injection. `sourceScopeOpts(ctx)` returns the federated array (when
     // present) OR the scalar; we pass both through to runThink which
@@ -348,14 +374,16 @@ const think: Operation = {
     // and get default scope + remote=false from runThink's CLI path.
     const thinkScope = thinkSourceScopeOpts(ctx);
     const requestedModel = p.model ? String(p.model) : undefined;
-    const thinkModel = remote ? await remoteThinkModel(ctx.engine, requestedModel) : { model: requestedModel };
+    const thinkModel = remote
+      ? await remoteThinkModel(ctx.engine, requestedModel).catch((e: unknown) => { throw thinkModelError(ctx, e); })
+      : { model: requestedModel };
     const { runThink, persistSynthesis } = await import('../think/index.ts');
     const result = await runThink(ctx.engine, {
       question: String(p.question),
       // #3734: MCP think must populate the question vector for takes retrieval.
       embedQuestion: (q) => embedQueryWithPrefix(ctx.engine, q),
       anchor: p.anchor ? String(p.anchor) : undefined,
-      rounds: remote ? 1 : typeof p.rounds === 'number' ? (p.rounds as number) : undefined,
+      rounds: remote ? await remoteThinkRounds(ctx.engine, p.rounds) : typeof p.rounds === 'number' ? (p.rounds as number) : undefined,
       save: safeSave,
       take: safeTake,
       model: thinkModel.model,
@@ -424,7 +452,7 @@ const think: Operation = {
       result.warnings.push(`MODEL_OVERRIDE_IGNORED:${thinkModel.ignored}`);
       ctx.emitNotice?.(modelOverrideIgnoredNotice(thinkModel.ignored));
     }
-    if (remote && (Boolean(p.save) || Boolean(p.take))) ctx.emitNotice?.(thinkNotSavedNotice());
+    if (remote && !remotePersist && (Boolean(p.save) || Boolean(p.take))) ctx.emitNotice?.(thinkNotSavedNotice());
     const { recordThinkAnswer, feedbackMetaFields } = await import('../feedback/record.ts');
     const feedbackMeta = feedbackMetaFields(await recordThinkAnswer(ctx, 'think', result));
     const evidence = result.taint_refs && [...result.taint_refs, ...(result.room_extra ?? [])];
@@ -439,7 +467,7 @@ const think: Operation = {
       saved_slug: savedSlug || null,
       evidence_inserted: evidenceInserted,
       take_row: takeRow,
-      remote_persisted_blocked: remote && (Boolean(p.save) || Boolean(p.take)),
+      remote_persisted_blocked: remote && !remotePersist && (Boolean(p.save) || Boolean(p.take)),
     }, evidence);
   },
   // hidden: 'think' is in CLI_ONLY (src/cli.ts) — the richer runThinkCli

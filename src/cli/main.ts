@@ -36,6 +36,7 @@ import type { AIGatewayConfig } from '../core/ai/types.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { OperationError, type OperationMeta } from '../core/ops/contract.ts';
 import { cliOps } from './op-manifest.ts';
+import { currentAIAttribution, withAIAttribution } from '../core/ai/invocation-guard.ts';
 import { openRequestConfigSnapshot, withoutRequestConfigSnapshot } from '../core/config-snapshot.ts';
 import { resolveSourceIdEngineFree } from '../core/source-resolver.ts';
 import { installCliRoutingFor } from './fix-routing-provider.ts';
@@ -363,6 +364,7 @@ async function main() {
   command = routed.command;
   let subArgs = routed.subArgs;
   dispatchedCommand = command;
+  { const attribution = currentAIAttribution(); if (attribution) attribution.cli_command = command; } // provider calls name the command (never its args)
   if (cliOpts.as !== undefined && !helpRequested) (await import('./as-preview.ts')).refuseAsOutsideOperations(command, subArgs, !CLI_ONLY.has(command) && (cliOps.has(command) || cliAliases.has(command))); // GBRA-218
   if (cliOpts.room !== undefined && !helpRequested && (CLI_ONLY.has(command) || !(cliOps.has(command) || cliAliases.has(command)))) process.stderr.write((await import('./room.ts')).roomNotMarkedLine(command)); // GBRA-498: never refused
   {
@@ -2857,7 +2859,7 @@ export function printOpHelp(op: OperationMeta, invokedName?: string) {
  * delivery) before calling this.
  */
 export function runCli(): void {
-  main().then(
+  withAIAttribution({ transport: 'cli' }, main).then(
     () => {
       if (shouldForceExitAfterMain()) flushThenExit(currentExitCode());
     },

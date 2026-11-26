@@ -146,6 +146,8 @@ export interface RunJobInChildOpts {
   signalProcessGroup?: typeof killProcessGroup;
   onConfigurationError?: (error: LocalConfigurationError) => void;
   onExecutionStopped?: () => void;
+  /** The child's provider-usage totals, from its outcome file (absent when it died before reporting). */
+  onUsage?: (usage: unknown) => void;
   /** GBRA-133: the worker's --max-rss in MB, applied to the child's process tree (0 or absent: no cap). */
   maxRssMb?: number;
   /** Injectable for tests. Default CHILD_RSS_CHECK_MS. */
@@ -483,6 +485,7 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
       );
     }
 
+    if (outcome.usage !== undefined) { try { opts.onUsage?.(outcome.usage); } catch { /* fail-open */ } }
     if (outcome.outcome === 'success') return outcome.result;
     if (rssStop) throw rssStop;
     const handlerError = reconstructHandlerError(outcome);

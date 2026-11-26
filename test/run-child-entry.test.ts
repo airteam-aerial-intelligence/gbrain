@@ -111,7 +111,8 @@ describe('runChildJobEntry', () => {
     expect(code).toBe(0);
     expect(sawData).toEqual({ full: true });
     const outcome = decodeChildOutcomeFile(resultPath);
-    expect(outcome).toEqual({ outcome: 'success', result: { pages: 7 } });
+    // `usage` is the child's provider-usage totals (none here): the worker folds it into the job's end line.
+    expect(outcome).toEqual({ outcome: 'success', result: { pages: 7 }, usage: {} });
     // The token-fenced progress write really landed.
     const rows = await engine.executeRaw<{ progress: unknown }>(
       'SELECT progress FROM minion_jobs WHERE id = $1',
@@ -234,7 +235,7 @@ describe('runChildJobEntry', () => {
     // TS control-flow can't see the closure write; compare explicitly.
     expect(ctxSignalAbortedAtShutdown === false).toBe(true);
     const outcome = decodeChildOutcomeFile(resultPath);
-    expect(outcome).toEqual({ outcome: 'success', result: { value: 'finished-during-drain' } });
+    expect(outcome).toEqual({ outcome: 'success', result: { value: 'finished-during-drain' }, usage: {} });
   });
 
   test('primitive results are wrapped {value: x} CHILD-side (completeJob shape parity across the JSON boundary)', async () => {
@@ -248,7 +249,7 @@ describe('runChildJobEntry', () => {
     );
 
     expect(code).toBe(0);
-    expect(decodeChildOutcomeFile(resultPath)).toEqual({ outcome: 'success', result: { value: 42 } });
+    expect(decodeChildOutcomeFile(resultPath)).toEqual({ outcome: 'success', result: { value: 42 }, usage: {} });
   });
 
   test('parent-death watchdog: aborts the handler and schedules the hard exit', async () => {
