@@ -50,7 +50,8 @@ import type {
   TouchpointKind,
 } from './types.ts';
 import { resolveRecipe, assertTouchpoint, parseModelId, embeddingDimsForModel } from './model-resolver.ts';
-import { recordChatUsage } from './chat-usage.ts';
+import { recordChatUsage, withChatPhase } from './chat-usage.ts';
+import { installUsageObservability } from './usage-observability.ts';
 import { buildExpansionPrompt } from './expansion-prompt.ts';
 import {
   OPENROUTER_CACHE_HEADER,
@@ -78,13 +79,16 @@ import { redactProviderKeys } from './key-redact.ts';
 import { applyVoyageOutputDimension, embeddingDimMismatchError } from './voyage-gateway.ts';
 import { reportEmbeddingAuthFailure } from './key-warnings.ts';
 import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gateway-config.ts';
-import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError } from './invocation-guard.ts';
+import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError, type AIInvocationUsage } from './invocation-guard.ts';
 import { installAICallLogFromEnv } from './call-log.ts';
 import { cachedQueryEmbedding, clearQueryEmbedCache, queryEmbedCacheKey, queryEmbedGeneration, storeQueryEmbedding } from './query-embed-cache.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
 installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
-const guardedExpansion = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS, 'gateway.expand');
+const guardedExpansionCall = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS, 'gateway.expand');
+// #7176: every expansion provider call (any outcome) lands in chat_usage_log with phase 'expansion'.
+const guardedExpansion: typeof guardedExpansionCall = (model, transport, opts) =>
+  withChatPhase('expansion', () => guardedExpansionCall(model, transport, opts));
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
 //
@@ -479,6 +483,7 @@ export function configureGateway(config: AIGatewayConfig): void {
   processState.noKeyNoticed.clear();
   warnRecipesMissingBatchTokens();
   installAICallLogFromEnv();
+  installUsageObservability();
 }
 
 /** The config the gateway keeps for `config`, with the chat and expansion defaults applied. */
@@ -3617,6 +3622,15 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 }
 
 /** One admitted chat attempt: the provider call plus its budget record. */
+/** A ChatResult's usage as invocation usage: its `input_tokens` is the total, the cache buckets are inside it. */
+function chatResultInvocationUsage(res: ChatResult): AIInvocationUsage | null {
+  const u = res?.usage;
+  if (!u || !Number.isFinite(u.input_tokens) || !Number.isFinite(u.output_tokens)) return null;
+  const read = Number.isFinite(u.cache_read_tokens) ? u.cache_read_tokens! : 0;
+  const write = Number.isFinite(u.cache_creation_tokens) ? u.cache_creation_tokens! : 0;
+  return { inputTokens: Math.max(0, u.input_tokens - read - write), outputTokens: u.output_tokens, cacheReadTokens: read, cacheWriteTokens: write };
+}
+
 async function chatAdmitted(opts: ChatOpts, admitted: {
   tracker: BudgetTracker | null; modelStrEarly: string; estimatedInputTokens: number; maxOutputTokens: number;
   chatRecord: { requestedModelId: string; purpose?: string; label: string; reservation?: BudgetReservation };
@@ -3631,7 +3645,7 @@ async function chatAdmitted(opts: ChatOpts, admitted: {
     let res: ChatResult | null = null;
     let threw: unknown = null;
     try {
-      res = await invokeAI(chatInvocation('gateway.chat', modelStrEarly, maxOutputTokens), () => _chatTransport!(opts), sdkInvocationUsage);
+      res = await invokeAI(chatInvocation('gateway.chat', modelStrEarly, maxOutputTokens), () => _chatTransport!(opts), chatResultInvocationUsage);
       // #4218 success boundary (test-transport lane): same accounting call as
       // the production path below so transport-driven tests exercise it.
       recordChatUsage({

@@ -59,6 +59,14 @@ export interface AIAttribution {
   job_id?: number | string;
   job_name?: string;
   phase?: string;
+  /** MCP/HTTP operation name (e.g. `query`). */
+  op?: string;
+  /** Who asked: MCP client name, plus `/<end user>` when known. */
+  caller?: string;
+  /** How the request arrived: `cli`, `stdio`, `http`, ... */
+  transport?: string;
+  /** Top-level CLI command name only (never its arguments). */
+  cli_command?: string;
 }
 const attributions = new AsyncLocalStorage<AIAttribution>();
 
@@ -80,6 +88,8 @@ export interface AIInvocationEvent {
   startedAt: number;
   ms: number;
   attribution: AIAttribution | null;
+  /** Constructor name of the thrown error (never its message). Set only when the call threw. */
+  errorClass?: string;
 }
 export type AIInvocationObserver = (event: AIInvocationEvent) => void;
 const observers = new Set<AIInvocationObserver>();
@@ -120,6 +130,7 @@ export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usa
   const startedAt = Date.now();
   let outcome: AIInvocationEvent['outcome'] = 'error';
   let measured: AIInvocationUsage | null = null;
+  let errorClass: string | undefined;
   try {
     const result = await admitAndRun(call, run, usage, rejected);
     outcome = 'ok';
@@ -127,12 +138,21 @@ export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usa
     return result;
   } catch (error) {
     if (isAIInvocationPolicyError(error)) outcome = 'refused';
+    errorClass = errorClassOf(error);
     throw error;
   } finally {
     const event: AIInvocationEvent = { call, outcome, usage: measured, startedAt, ms: Date.now() - startedAt, attribution: currentAIAttribution() };
+    if (errorClass !== undefined) event.errorClass = errorClass;
     notifyObservers(event);
     if (meter) { try { meter(event); } catch { observerFailures += 1; } }
   }
+}
+
+function errorClassOf(error: unknown): string {
+  try {
+    const name = (error as { constructor?: { name?: unknown } } | null)?.constructor?.name;
+    return typeof name === 'string' && name ? name : typeof error;
+  } catch { return typeof error; }
 }
 
 async function admitAndRun<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>,

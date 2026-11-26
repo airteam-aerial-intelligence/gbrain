@@ -173,6 +173,8 @@ const FORWARD_REFERENCE_PROBES: readonly Probe[] = [
   ['derived_generation_items_pending_exists', 'derived_generation_items', 'pending'],
   ['link_transitions_exists', 'link_transitions'],
   ['link_transitions_link_source_exists', 'link_transitions', 'link_source'],
+  ['chat_usage_log_exists', 'chat_usage_log'],
+  ['chat_usage_log_job_id_exists', 'chat_usage_log', 'job_id'],
 ];
 
 // Probed only where `dreamVerdictsForwardReference` (the Postgres blob).
@@ -325,6 +327,9 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
   // the replay (CREATE INDEX IF NOT EXISTS checks columns before the name).
   const needsLinkTransitionsLinkSource = probe.link_transitions_exists
     && !probe.link_transitions_link_source_exists;
+  // v328: the blob's partial idx_chat_usage_log_job references job_id, a column
+  // only v328 adds to a brain at v140-v327.
+  const needsChatUsageJobId = probe.chat_usage_log_exists && !probe.chat_usage_log_job_id_exists;
   return {
     needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap, needsPagesDeletedAt,
     needsMcpLogBootstrap, needsSubagentProviderId, needsChunksEmbeddingImage, needsPagesRecency,
@@ -334,7 +339,7 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
     needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
-    needsLinkTransitionsLinkSource,
+    needsLinkTransitionsLinkSource, needsChatUsageJobId,
   };
 }
 
@@ -353,7 +358,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
     needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
-    needsLinkTransitionsLinkSource,
+    needsLinkTransitionsLinkSource, needsChatUsageJobId,
   } = gaps;
 
   if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -372,7 +377,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
       && !needsMinionJobsPrivateQueue && !needsMinionJobsAuthority
       && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity
       && !needsDerivedGenerationItemsPending
-      && !needsLinkTransitionsLinkSource) return;
+      && !needsLinkTransitionsLinkSource && !needsChatUsageJobId) return;
 
   process.stderr.write('  Schema forward-reference gap detected, applying bootstrap\n');
 
@@ -605,7 +610,7 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     needsPagesGeneration, needsPagesEmbeddingSignature, needsPagesLinksExtractedAt,
     needsTimelineEventPageId, needsMinionJobsTimeoutAt, needsMinionJobsIdempotencyKey,
     needsDreamVerdictsExpiresAt, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource,
+    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource, needsChatUsageJobId,
   } = gaps;
 
   if (needsPagesLastRetrievedAt) {
@@ -751,6 +756,22 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     // v302 still runs and swaps the identity index online.
     await exec(`
       ALTER TABLE link_transitions ADD COLUMN IF NOT EXISTS link_source TEXT;
+    `);
+  }
+
+  if (needsChatUsageJobId) {
+    // Columns only, exactly as v328 adds them and in its order (so an upgraded
+    // brain's column order matches a fresh one); v328 still runs and owns the index.
+    await exec(`
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS kind TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS operation TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS job_id BIGINT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS job_name TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS op TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS caller TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS cli_command TEXT;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS latency_ms INTEGER;
+      ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS outcome TEXT;
     `);
   }
 }

@@ -1,5 +1,6 @@
 /**
  * #7176: every read-path model call lands in chat_usage_log with a phase.
+ * (The ledger records every provider call, failed ones included.)
  *
  *   - query expansion (gateway.expand) writes a row with its model, tokens
  *     and phase `expansion`, on every expand() path, even inside a job;
@@ -83,12 +84,13 @@ describe('query expansion in chat_usage_log', () => {
     expect(rows.map(r => r.phase)).toEqual(['expansion']);
   });
 
-  test('a failed expansion writes no row (the ledger records successes only)', async () => {
+  test('a failed expansion writes one error row, still phase expansion (every provider call is recorded)', async () => {
     expansionGateway();
     __setGenerateObjectTransportForTests(async () => { throw new Error('simulated 503'); });
     capture();
     expect(await expand('widget pricing')).toEqual(['widget pricing']);
-    expect(rows).toEqual([]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ model: HAIKU, phase: 'expansion', kind: 'chat', operation: 'gateway.expand', outcome: 'error', input_tokens: 0, cost_usd: null });
   });
 });
 
@@ -99,16 +101,18 @@ describe('think in chat_usage_log', () => {
     __setChatTransportForTests(async () => chatResultOf(answer));
     capture();
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-hermetic' }, () => runThink(engine, { question: 'How is widget pricing set?', withTrajectory: false }));
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every(r => r.phase === 'think')).toBe(true);
+    const chats = rows.filter(r => r.kind === 'chat');
+    expect(chats.length).toBeGreaterThan(0);
+    expect(chats.every(r => r.phase === 'think')).toBe(true);
   });
 
   test('think inside a job keeps the job phase', async () => {
     __setChatTransportForTests(async () => chatResultOf(answer));
     capture();
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-hermetic' }, () => withChatPhase('job:example', () => runThink(engine, { question: 'How is widget pricing set?', withTrajectory: false })));
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every(r => r.phase === 'job:example')).toBe(true);
+    const chats = rows.filter(r => r.kind === 'chat');
+    expect(chats.length).toBeGreaterThan(0);
+    expect(chats.every(r => r.phase === 'job:example')).toBe(true);
   });
 });
 

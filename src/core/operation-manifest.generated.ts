@@ -3771,7 +3771,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Aggregate chat usage + cost from the chat_usage_log ledger (per-model and per-phase token counts, cache reads/writes, USD estimates) with explicit coverage fields.",
+    "description": "Aggregate usage + cost of all provider calls (chat, expansion, embedding, rerank, subagent) from the chat_usage_log ledger (per-model, per-phase and per-kind token counts, cache reads/writes, USD estimates) with explicit coverage fields.",
     "params": {
       "days": {
         "type": "number",

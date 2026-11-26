@@ -36,12 +36,14 @@ import type { MinionHandler } from './types.ts';
 import { buildJobContext } from './job-context.ts';
 import { runWithJobSpend } from './spend-authorization.ts';
 import { withChatPhase } from '../ai/chat-usage.ts';
+import { withAIAttribution } from '../ai/invocation-guard.ts';
+import { newUsageTotals, usageTotalsToJSON, withUsageScope } from '../ai/usage-observability.ts';
 import {
   JOB_CHILD_EXIT_NOT_CLAIMED,
   JOB_CHILD_EXIT_RESULT_WRITE_FAILED,
   WORKER_EXIT_CONFIGURATION,
 } from './worker-exit-codes.ts';
-import { childConfigurationError, encodeHandlerError, unrefTimer, writeChildOutcomeFile } from './job-isolation.ts';
+import { childConfigurationError, encodeHandlerError, unrefTimer, writeChildOutcomeFile, type ChildOutcome } from './job-isolation.ts';
 import { isLocalConfigurationError } from './configuration-error.ts';
 import { jobChildBuildVerdict } from './child-readiness.ts';
 
@@ -171,12 +173,15 @@ export async function runChildJobEntry(
       catch (error) { process.stderr.write(`[run-child] could not record the build skew on job ${job.id}: ${error instanceof Error ? error.message : String(error)}\n`); }
       if (verdict.refused) return writeChildBootstrapError(opts.resultPath, childConfigurationError('child_protocol_incompatible'));
     }
-    let outcome;
+    let outcome: ChildOutcome;
+    const usage = newUsageTotals();
     try {
       // #4218: same phase attribution as the in-process worker path — the
       // isolated child runs its own gateway, so the wrap must live here too.
       const authority = await authorizeJobExecution(engine, job);
-      const result = await withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => runWithJobSpend(engine, job, context, handler)), abort.signal);
+      // Provider calls carry the job's id/name and add to `usage`, reported back to the worker in the outcome file.
+      const result = await withUsageScope(usage, () => withSubmissionAuthority(authority, () => withAIAttribution({ job_id: job.id, job_name: job.name },
+        () => withChatPhase(`job:${job.name}`, () => runWithJobSpend(engine, job, context, handler))), abort.signal));
       // completeJob's {value: x} wrap decision must run BEFORE JSON
       // serialization: a JSON round-trip changes typeof for Date /
       // toJSON-bearing results (object → string), which would flip the wrap
@@ -190,7 +195,7 @@ export async function runChildJobEntry(
       outcome = encodeHandlerError(err);
     }
     try {
-      writeChildOutcomeFile(opts.resultPath, outcome);
+      writeChildOutcomeFile(opts.resultPath, { ...outcome, usage: usageTotalsToJSON(usage) });
     } catch (writeErr) {
       const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
       process.stderr.write(`[run-child] failed to write outcome file: ${msg}\n`);

@@ -2,9 +2,10 @@
  * chat-usage.ts — durable per-call chat usage accounting (#4218, reviving the
  * #3392 shape).
  *
- * gateway.chat() calls `recordChatUsage` at its SUCCESS boundary (both the
- * production provider path and the test-transport path) with the answering
- * model + token usage. This module:
+ * Every provider call made through `invokeAI` (chat, expansion, embedding,
+ * rerank, multimodal, decide, transcription, subagent) is seen by the usage
+ * observer (usage-observability.ts), which calls `recordProviderCall` — the
+ * ONE writer of chat_usage_log rows. This module:
  *
  *   - attributes a best-effort PHASE via AsyncLocalStorage (`withChatPhase`):
  *     the minion worker wraps handler execution in `job:<name>`; `think`
@@ -13,20 +14,24 @@
  *     `expansion` (#7176); other direct CLI / op callers record with phase
  *     NULL unless they opt in. Attribution is advisory — a missing phase never
  *     blocks the record.
- *   - prices the call from CANONICAL_PRICING (`estimateChatCostUsd`),
+ *   - prices chat calls from CANONICAL_PRICING (`estimateChatCostUsd`),
  *     including cache_read/cache_write tokens at the provider's cache rates
  *     when the table carries them (Anthropic), falling back to the input
  *     rate otherwise. Unknown models record cost_usd = NULL (never a fake 0).
  *   - forwards the record to the registered sink FIRE-AND-FORGET. Accounting
  *     is strictly fail-open: a sink error (missing table pre-migration,
- *     closed engine, disk pressure) must never break a chat call.
+ *     closed engine, disk pressure) must never break a provider call.
  *
- * Coverage contract (surfaced verbatim by the `get_usage` op): only
- * gateway.chat() and gateway.expand() calls are logged. The subagent raw-SDK path, embeddings
- * (embedding-pricing.ts owns those), and calls made before the sink was
- * registered or before migration v140 are NOT covered. Failed chat calls are
- * not logged either — the budget tracker (budget-tracker.ts) remains the
- * pessimistic in-flight spend gate; this table is the after-the-fact ledger.
+ * `recordChatUsage` (gateway.chat()/expand() success boundary) now only feeds
+ * the in-process call meters; it no longer writes rows, so a chat call is
+ * never counted twice.
+ *
+ * Coverage contract (surfaced by the `get_usage` op): every provider call in
+ * a process whose sink is registered, with its outcome (failed calls record
+ * 0 tokens and cost NULL). Calls made before the sink was registered or
+ * before migration v140 are NOT covered; the attribution columns need v328.
+ * The budget tracker (budget-tracker.ts) remains the pessimistic in-flight
+ * spend gate; this table is the after-the-fact ledger.
  *
  * No engine import here (the sink is injected) — this module stays a leaf so
  * the gateway can import it statically without deepening any cycle.
@@ -37,6 +42,7 @@ import { canonicalLookup, priceAtPromptSize } from '../model-pricing.ts';
 import { priceFor, type PricingOverrides } from '../budget/reservation-cost.ts';
 import { embeddedEngineInScope } from '../engine-scope.ts';
 import { engineKey } from '../engine-key.ts';
+import { installUsageObservability } from './usage-observability.ts';
 
 export interface ChatUsageRecord {
   /** "provider:modelId" of the model that actually answered. */
@@ -51,6 +57,16 @@ export interface ChatUsageRecord {
   cache_write_tokens: number;
   /** USD, priced from CANONICAL_PRICING. NULL when the model has no pricing. */
   cost_usd: number | null;
+  /** Attribution (migration v328). Absent/null = unknown. */
+  kind?: string | null;
+  operation?: string | null;
+  job_id?: number | null;
+  job_name?: string | null;
+  op?: string | null;
+  caller?: string | null;
+  cli_command?: string | null;
+  latency_ms?: number | null;
+  outcome?: string | null;
 }
 
 export type ChatUsageSink = (record: ChatUsageRecord) => void | Promise<void>;
@@ -121,12 +137,14 @@ function sinkInScope(): ChatUsageSink | null {
 
 /** Gives an engine opened from settings its own sink, off the process stack. Returns the handle its close calls. */
 export function registerEngineChatUsageSink(engine: object, sink: ChatUsageSink): () => void {
+  installUsageObservability();
   _engineSinks.set(engineKey(engine), sink);
   return () => { _engineSinks.delete(engineKey(engine)); };
 }
 
 /** Register a usage sink, for `engine` when given. Returns an idempotent deregister handle. */
 export function registerChatUsageSink(sink: ChatUsageSink, engine?: object): () => void {
+  installUsageObservability();
   const entry: SinkEntry = { sink, engine };
   _sinks.push(entry);
   return () => {
@@ -144,6 +162,7 @@ export function __chatUsageSinkCountForTests(): number {
  * installs `sink` as the only entry (null = clear).
  */
 export function setChatUsageSink(sink: ChatUsageSink | null): void {
+  if (sink) installUsageObservability();
   _sinks = sink ? [{ sink }] : [];
 }
 
@@ -178,12 +197,30 @@ export function estimateChatCostUsd(
 }
 
 /**
- * Called by gateway.chat() at its success boundary. Never throws; the sink
- * runs fire-and-forget with errors swallowed. `usage` is the gateway's
- * `ChatResult.usage` (AI SDK convention): `input_tokens` is the TOTAL input,
- * and the cache read/write counts are subsets of it, so the call is priced as
- * (input - cache) at the input rate plus each cache bucket at its own rate,
- * never the cache tokens a second time on top of the total.
+ * The one writer of chat_usage_log rows: called by the usage observer for
+ * every provider call. Resolves the sink in the caller's scope synchronously,
+ * then writes fire-and-forget. Never throws.
+ */
+export function recordProviderCall(record: ChatUsageRecord): void {
+  try {
+    const sink = sinkInScope();
+    if (!sink) return;
+    void Promise.resolve(sink(record)).catch(() => {
+      /* fail-open: accounting must never break a provider call */
+    });
+  } catch {
+    /* fail-open */
+  }
+}
+
+/**
+ * Called by gateway.chat() / expand() at their success boundary. Feeds the
+ * enclosing call meter only (rows come from `recordProviderCall`). Never
+ * throws. `usage` is the gateway's `ChatResult.usage` (AI SDK convention):
+ * `input_tokens` is the TOTAL input, and the cache read/write counts are
+ * subsets of it, so the call is priced as (input - cache) at the input rate
+ * plus each cache bucket at its own rate, never the cache tokens a second
+ * time on top of the total.
  */
 export function recordChatUsage(input: {
   model: string;
@@ -198,36 +235,19 @@ export function recordChatUsage(input: {
   };
 }): void {
   const meter = __chatMeterStore.getStore();
-  if (meter) meter.calls++;
-  const sink = sinkInScope();
-  const pricedMeter = meter && meter.cost_usd !== undefined ? meter : null;
-  if (!sink && !pricedMeter) return;
+  if (!meter) return;
+  meter.calls++;
+  if (meter.cost_usd === undefined) return;
   try {
     const { input_tokens, output_tokens, cache_read_tokens = 0, cache_write_tokens = 0 } = input.usage;
     const uncached = Math.max(0, input_tokens - cache_read_tokens - cache_write_tokens);
     const cost_usd = estimateChatCostUsd(input.model, { ...input.usage, input_tokens: uncached });
-    if (pricedMeter) {
-      const price = priceFor(input.model, 'chat', pricedMeter.pricing_overrides);
-      const meterCost = price === null ? null
-        : price.source === 'table' && cost_usd !== null ? cost_usd
-        : (input_tokens * price.pricing.input + output_tokens * price.pricing.output) / 1_000_000;
-      if (meterCost === null) pricedMeter.unpriced_calls = (pricedMeter.unpriced_calls ?? 0) + 1;
-      else pricedMeter.cost_usd = (pricedMeter.cost_usd ?? 0) + meterCost;
-    }
-    if (!sink) return;
-    const record: ChatUsageRecord = {
-      model: input.model,
-      provider: input.provider ?? null,
-      phase: input.phase ?? currentChatPhase(),
-      input_tokens: Math.max(0, Math.round(input.usage.input_tokens || 0)),
-      output_tokens: Math.max(0, Math.round(input.usage.output_tokens || 0)),
-      cache_read_tokens: Math.max(0, Math.round(input.usage.cache_read_tokens || 0)),
-      cache_write_tokens: Math.max(0, Math.round(input.usage.cache_write_tokens || 0)),
-      cost_usd,
-    };
-    void Promise.resolve(sink(record)).catch(() => {
-      /* fail-open: accounting must never break a chat call */
-    });
+    const price = priceFor(input.model, 'chat', meter.pricing_overrides);
+    const meterCost = price === null ? null
+      : price.source === 'table' && cost_usd !== null ? cost_usd
+      : (input_tokens * price.pricing.input + output_tokens * price.pricing.output) / 1_000_000;
+    if (meterCost === null) meter.unpriced_calls = (meter.unpriced_calls ?? 0) + 1;
+    else meter.cost_usd = (meter.cost_usd ?? 0) + meterCost;
   } catch {
     /* fail-open */
   }
@@ -246,8 +266,10 @@ export function makeEngineChatUsageSink(engine: {
     await engine.executeRaw(
       `INSERT INTO chat_usage_log
          (model, provider, phase, input_tokens, output_tokens,
-          cache_read_tokens, cache_write_tokens, cost_usd)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          cache_read_tokens, cache_write_tokens, cost_usd,
+          kind, operation, job_id, job_name, op, caller, cli_command,
+          latency_ms, outcome)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
       [
         r.model,
         r.provider,
@@ -257,6 +279,15 @@ export function makeEngineChatUsageSink(engine: {
         r.cache_read_tokens,
         r.cache_write_tokens,
         r.cost_usd,
+        r.kind ?? null,
+        r.operation ?? null,
+        r.job_id ?? null,
+        r.job_name ?? null,
+        r.op ?? null,
+        r.caller ?? null,
+        r.cli_command ?? null,
+        r.latency_ms ?? null,
+        r.outcome ?? null,
       ],
     );
   };

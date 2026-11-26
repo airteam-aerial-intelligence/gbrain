@@ -28,6 +28,9 @@ import {
 import { MinionQueue } from './queue.ts';
 import { runWaitingTtlTick, ttlNoticeGraceMs } from './admission.ts';
 import { withChatPhase } from '../ai/chat-usage.ts';
+import { withAIAttribution } from '../ai/invocation-guard.ts';
+import { withUsageScope } from '../ai/usage-observability.ts';
+import { endJobUsage, mergeChildJobUsage, noteJobUsage, startJobUsage, type JobUsageRun } from './job-usage.ts';
 import { calculateBackoff } from './backoff.ts';
 import { RateLeaseUnavailableError } from './handlers/subagent.ts';
 import { leaseFullBackoffMs } from './rate-leases.ts';
@@ -1490,15 +1493,18 @@ export class MinionWorker extends EventEmitter {
     else console.log(`Job ${job.id} (${job.name}) deferred (${err.reason}) for ${Math.round(err.retryInMs / 1000)}s (no attempt burned)`);
   }
 
-  private async executeJob(
-    job: MinionJob,
-    lockToken: string,
-    abort: AbortController,
-    lockTimer: ReturnType<typeof setInterval>,
-  ): Promise<void> {
+  /** One job under a usage scope: provider calls add to its totals; `gbrain.job` start/end lines bracket it. */
+  private async executeJob(job: MinionJob, lockToken: string, abort: AbortController, lockTimer: ReturnType<typeof setInterval>): Promise<void> {
+    const run = startJobUsage(job, this.opts.jobIsolation === 'process');
+    try { await withUsageScope(run.totals, () => this.executeJobBody(job, lockToken, abort, lockTimer, run)); }
+    catch (err) { noteJobUsage(run, 'error', err); throw err; }
+    finally { endJobUsage(job, run); }
+  }
+
+  private async executeJobBody(job: MinionJob, lockToken: string, abort: AbortController, lockTimer: ReturnType<typeof setInterval>, run: JobUsageRun): Promise<void> {
     const handler = this.handlers.get(job.name);
     if (!handler) {
-      await this.queue.failJob(job.id, lockToken, `No handler for job type '${job.name}'`, 'dead');
+      noteJobUsage(run, 'dead', `No handler for job type '${job.name}'`); await this.queue.failJob(job.id, lockToken, `No handler for job type '${job.name}'`, 'dead');
       return;
     }
 
@@ -1554,10 +1560,11 @@ export class MinionWorker extends EventEmitter {
             onConfigurationError: error => {
               this.blockForConfiguration(error);
             },
+            onUsage: usage => mergeChildJobUsage(run, usage),
           })
         // #4218: attribute every gateway.chat() the handler makes to this
         // job so chat_usage_log rows carry `phase = 'job:<name>'`.
-        : await withEngineScope(this.engine, () => withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => runWithJobSpend(this.engine, job, context as MinionJobContext, handler)), abort.signal));
+        : await withEngineScope(this.engine, () => withSubmissionAuthority(authority, () => withAIAttribution({ job_id: job.id, job_name: job.name }, () => withChatPhase(`job:${job.name}`, () => runWithJobSpend(this.engine, job, context as MinionJobContext, handler))), abort.signal));
 
       // The child spawned and ran — the spawn path is healthy again.
       this._consecutiveChildSpawnFailures = 0;
@@ -1571,6 +1578,7 @@ export class MinionWorker extends EventEmitter {
         : await this.queue.completeJob(job.id, lockToken, jobOutcomeResult(stored, verdict));
       const execution = this.executions.get(lockToken);
       if (execution) execution.stopped = true;
+      noteJobUsage(run, verdict.outcome === 'failed' ? 'failed' : 'completed', verdict.outcome === 'failed' ? verdict.reason : undefined);
 
       if (!completed) {
         console.warn(`Job ${job.id} completion dropped (lock token mismatch, job was reclaimed)`);
@@ -1605,6 +1613,7 @@ export class MinionWorker extends EventEmitter {
       } else {
         errorText = err instanceof Error ? err.message : String(err);
       }
+      noteJobUsage(run, 'released', errorText);
       if (abortReason === 'watchdog' && await settleWatchdogAbort(this.queue, this.engine, job, lockToken, this.inFlight.get(job.id)?.shared !== false, execution?.stopped !== false)) return;
 
       // v0.41.22.2 (D8a / codex C6): infrastructure aborts (lock-renewal-failed,
@@ -1734,6 +1743,7 @@ export class MinionWorker extends EventEmitter {
       } else {
         newStatus = 'delayed';
       }
+      noteJobUsage(run, newStatus);
 
       const backoffMs = newStatus === 'delayed' ? calculateBackoff({
         backoff_type: job.backoff_type,
