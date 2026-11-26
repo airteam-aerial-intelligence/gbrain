@@ -15,10 +15,11 @@ import { isValidSourceId } from '../source-id.ts';
 import { parseStoredActor } from '../access/actor-model.ts';
 import { discoverGitRoot } from '../sync-git.ts';
 import type { MinionJob } from './types.ts';
+import { authorizeRemoteCallerExecution, parseRemoteCallerAuthority, type RemoteCallerAuthority } from './remote-caller-authority.ts';
 
 export const REMOTE_JOB_NAMES = ['sync', 'import', 'lint', 'lint-fix'] as const;
 export type RemoteJobName = typeof REMOTE_JOB_NAMES[number];
-export type SubmissionAuthority = { version: 1; kind: 'application' } | RemoteJobAuthority | RemoteAgentAuthority;
+export type SubmissionAuthority = { version: 1; kind: 'application' } | RemoteJobAuthority | RemoteAgentAuthority | RemoteCallerAuthority;
 export interface RemoteAgentAuthority {
   version: 1;
   kind: 'remote_agent';
@@ -32,7 +33,11 @@ export interface RemoteAgentAuthority {
     actor?: { system: string; external_id: string; member: string };
     /** #9669: the tool surface of the connection that submitted the job; every tool call is confined to it. Absent on a
      *  job accepted before it was recorded, which keeps the full surface it was accepted under. */
-    surface?: 'verbs' | 'starter' | 'full' };
+    surface?: 'verbs' | 'starter' | 'full';
+    /** The owner key job reads match (jobOwnerKey); absent on jobs accepted before it was recorded. */
+    owner?: string;
+    /** The end user the submitting call declared (X-Gbrain-End-User); the job's tool calls attribute writes to it. */
+    endUser?: string };
   payloadHash: string;
 }
 export interface RemoteJobAuthority {
@@ -47,10 +52,27 @@ export interface RemoteJobAuthority {
     worktreeRoot: string | null;
     jobName: RemoteJobName;
     allowedOperations?: string[] | null;
+    /** The owner key job reads match (jobOwnerKey); absent on jobs accepted before it was recorded. */
+    owner?: string;
+    endUser?: string;
   };
   payloadHash: string;
 }
 export const APPLICATION_AUTHORITY: SubmissionAuthority = Object.freeze({ version: 1, kind: 'application' });
+
+/**
+ * The identity a remote caller's jobs are owned by: its credential (an OAuth client id as is, so jobs submit_agent
+ * stamped before this key existed still match; any other principal as `<kind>:<id>`) plus the end user it declared
+ * (X-Gbrain-End-User), so callers behind one shared credential never see each other's jobs. Null without a credential.
+ */
+export function jobOwnerKey(auth: Pick<AuthInfo, 'principal' | 'clientId'> | undefined, endUser?: string | null): string | null {
+  const p = auth?.principal;
+  const base = p ? (p.kind === 'oauth_client' ? p.id : `${p.kind}:${p.id}`) : auth?.clientId;
+  if (typeof base !== 'string' || !base) return null;
+  return endUser ? `${base}|end_user:${endUser}` : base;
+}
+const ownerFieldsOk = (g: Record<string, unknown>) => (g.owner === undefined || (typeof g.owner === 'string' && g.owner.length > 0))
+  && (g.endUser === undefined || (typeof g.endUser === 'string' && g.endUser.length > 0));
 const executionAuthority = new AsyncLocalStorage<{ authority: SubmissionAuthority; signal?: AbortSignal }>();
 export function currentSubmissionAuthority(): SubmissionAuthority | undefined { return executionAuthority.getStore()?.authority; }
 export function currentRemoteJobAuthority(): RemoteJobAuthority | undefined {
@@ -82,6 +104,7 @@ export function parseSubmissionAuthority(value: unknown): SubmissionAuthority | 
   const a = record(value);
   if (a?.version !== 1) return null;
   if (a.kind === 'application') return APPLICATION_AUTHORITY;
+  if (a.kind === 'remote_caller') return parseRemoteCallerAuthority(a); // Airteam fork
   const p = record(a.principal), g = record(a.grant);
   if (a.kind === 'remote_agent') {
     if (p?.kind !== 'oauth_client' || typeof p.id !== 'string' || !p.id || !g ||
@@ -91,7 +114,7 @@ export function parseSubmissionAuthority(value: unknown): SubmissionAuthority | 
         !Array.isArray(g.allowedSlugPrefixes) || !g.allowedSlugPrefixes.every(v => typeof v === 'string') ||
         (g.actingFor !== undefined && (!Array.isArray(g.actingFor) || !g.actingFor.length || g.actingFor.length > 50 || !g.actingFor.every(v => typeof v === 'string' && v.length))) ||
         (g.actor !== undefined && (g.actingFor !== undefined || !parseStoredActor(g.actor))) ||
-        (g.surface !== undefined && !['verbs', 'starter', 'full'].includes(g.surface as string)) ||
+        (g.surface !== undefined && !['verbs', 'starter', 'full'].includes(g.surface as string)) || !ownerFieldsOk(g) ||
         typeof a.payloadHash !== 'string' || !/^[a-f0-9]{64}$/.test(a.payloadHash)) return null;
     return structuredClone(a) as unknown as RemoteAgentAuthority;
   }
@@ -103,7 +126,7 @@ export function parseSubmissionAuthority(value: unknown): SubmissionAuthority | 
       typeof g.sourceId !== 'string' || !isValidSourceId(g.sourceId) ||
       typeof g.sourceCreatedAt !== 'string' || typeof g.canonicalRoot !== 'string' || !g.canonicalRoot ||
       !(g.worktreeRoot === null || typeof g.worktreeRoot === 'string') ||
-      !REMOTE_JOB_NAMES.includes(g.jobName as RemoteJobName) || typeof a.payloadHash !== 'string' ||
+      !REMOTE_JOB_NAMES.includes(g.jobName as RemoteJobName) || !ownerFieldsOk(g) || typeof a.payloadHash !== 'string' ||
       !/^[a-f0-9]{64}$/.test(a.payloadHash)) return null;
   return structuredClone(a) as unknown as RemoteJobAuthority;
 }
@@ -175,6 +198,12 @@ export async function assertCurrentRemoteJobPrincipal(engine: BrainEngine, autho
   }
 }
 
+/** The owner key and declared end user a remote submission records on its authority. */
+function callerOwnership(ctx: OperationContext): { owner?: string; endUser?: string } {
+  const owner = jobOwnerKey(ctx.auth, ctx.endUser);
+  return { ...(owner ? { owner } : {}), ...(ctx.endUser ? { endUser: ctx.endUser } : {}) };
+}
+
 export async function prepareRemoteJob(
   ctx: OperationContext, name: string, input: unknown,
 ): Promise<{ data: Record<string, unknown>; authority: RemoteJobAuthority }> {
@@ -205,7 +234,7 @@ export async function prepareRemoteJob(
   const authority: RemoteJobAuthority = {
     version: 1, kind: 'remote_generic', principal: { ...principal },
     grant: { scopes: [...ctx.auth!.scopes], sourceId, ...boundary, jobName: name as RemoteJobName,
-      allowedOperations: ctx.auth?.allowedOperations == null ? null : [...ctx.auth.allowedOperations] },
+      allowedOperations: ctx.auth?.allowedOperations == null ? null : [...ctx.auth.allowedOperations], ...callerOwnership(ctx) },
     payloadHash: authorityDigest(data),
   };
   await assertCurrentRemoteJobPrincipal(ctx.engine, authority);
@@ -274,7 +303,7 @@ export async function prepareRemoteAgent(ctx: OperationContext, data: Record<str
     version: 1, kind: 'remote_agent', principal: { kind: 'oauth_client', id: principal.id },
     grant: { scopes: [...ctx.auth!.scopes], sourceId: data.source_id, sourceCreatedAt: new Date(source.created_at as string).toISOString(),
       allowedTools: [...data.allowed_tools as string[]], allowedSlugPrefixes: [...data.allowed_slug_prefixes as string[]],
-      ...(actor ? { actor: { ...actor } } : actingFor?.length ? { actingFor: [...actingFor] } : {}), surface: ctx.surface ?? 'full' },
+      ...(actor ? { actor: { ...actor } } : actingFor?.length ? { actingFor: [...actingFor] } : {}), surface: ctx.surface ?? 'full', ...callerOwnership(ctx) },
     payloadHash: authorityDigest(data),
   };
   if (!parseSubmissionAuthority(authority)) deny('invalid agent grant', 'Send allowed_tools as a non-empty list of tool names and allowed_slug_prefixes as a list of strings.');
@@ -288,6 +317,7 @@ export async function authorizeJobExecution(engine: BrainEngine, job: Pick<Minio
   if (!a) deny('missing or unsupported submission authority; review locally with jobs authorize-legacy',
     'This queued job has no readable submission authority, so it does not run until reviewed. On the brain host, gbrain jobs authorize-legacy lists it for the user to approve or cancel.');
   if (a.kind === 'application') return a;
+  if (a.kind === 'remote_caller') { await authorizeRemoteCallerExecution(engine, a, job); return a; } // Airteam fork
   if (a.kind === 'remote_agent') {
     if (job.name !== 'subagent' || authorityDigest(job.data) !== a.payloadHash) deny('agent payload differs from its accepted grant',
       'This agent job\'s data changed after it was accepted, so it does not run. Submit a new agent job.');
@@ -309,7 +339,8 @@ export async function assertRemoteJobControl(ctx: OperationContext, job: MinionJ
   if (ctx.remote === false) return;
   const a = parseSubmissionAuthority(job.submission_authority);
   if (!a || a.kind === 'application' || !ctx.auth?.principal ||
-      authorityDigest(a.principal) !== authorityDigest(ctx.auth.principal)) deny('only the submitting principal may restart a generic remote job',
+      authorityDigest(a.principal) !== authorityDigest(ctx.auth.principal) ||
+      (a.grant.owner !== undefined && a.grant.owner !== jobOwnerKey(ctx.auth, ctx.endUser))) deny('only the submitting principal may restart a generic remote job',
     'Only the principal that submitted this job can restart it. Submit a new job from this connection instead.');
   if (overrides !== undefined && (!record(overrides) || Object.keys(overrides as object).length)) deny('replay overrides are unavailable remotely; submit a new job',
     'Restart the job without overrides, or submit a new job with the changed data.');

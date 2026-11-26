@@ -1,6 +1,6 @@
-import { prepareRemoteJob, prepareRemoteAgent, assertRemoteJobControl } from '../minions/submission-authority.ts';
+import { prepareRemoteJob, prepareRemoteAgent, assertRemoteJobControl, jobOwnerKey } from '../minions/submission-authority.ts';
 import type { MinionJob } from '../minions/types.ts';
-import { jobActorSql, jobAudienceKey, type JobActor } from '../minions/types.ts';
+import { jobActorSql, jobAudienceKey, jobOwnerSql, type JobActor } from '../minions/types.ts';
 import { currentCallerAccess } from '../search/private-visibility.ts';
 
 function publicJob(job: MinionJob) {
@@ -66,37 +66,31 @@ import {
 // --- Jobs (Minions) ---
 
 /**
- * #4098 — agent-lane ownership fence for the generic jobs ops.
+ * Ownership fence for the job read and control ops (get_job, wait_job, list_jobs, get_job_progress, cancel_job,
+ * pause_job, send_job_message, watch_job). Returns the owner key to fence on, or null when the caller is unfenced:
  *
- * get_job / list_jobs / get_job_progress / cancel_job are `scope: 'admin'`
- * ops that gained `agentCallable: true` so an agent-scoped OAuth client can
- * monitor + cancel the jobs it submitted via submit_agent — WITHOUT admin.
- * Returns the owner client id to fence on, or null when the caller is
- * unfenced (full visibility):
- *
- *   - trusted local CLI (ctx.remote === false): unfenced (today's behavior)
- *   - token with admin scope: unfenced (satisfied the op's declared scope)
- *   - stdio MCP (remote, transport 'stdio', no per-token auth): unfenced —
- *     the local-pipe surface ceiling governs there, same posture as today
- *   - anything else (the agentCallable carve-out, i.e. agent scope without
- *     admin): MUST carry ctx.auth.clientId; fenced on
- *     `data->>'__owner_client_id'`. Missing identity → permission_denied
- *     (fail closed, mirroring get_agent_job).
+ *   - trusted local CLI (ctx.remote === false): unfenced
+ *   - stdio MCP (remote, transport 'stdio', no per-token auth): unfenced (the local pipe is the host operator)
+ *   - an admin credential bound to the brain owner: unfenced (the operator's whole-queue view)
+ *   - every other remote caller, admin scope included: fenced on the owner key its own submissions recorded
+ *     (jobOwnerKey: the credential plus the declared end user, matched by jobOwnerSql), so a caller sees and
+ *     steers only the jobs it submitted, never another credential's or another end user's prompts and results.
+ *     No credential identity → permission_denied (fail closed).
  */
 export function agentOwnerFence(ctx: OperationContext, opName: string): string | null {
   if (ctx.remote === false) return null;
-  const scopes = ctx.auth?.scopes;
-  if (scopes && hasScope(scopes, 'admin')) return null;
   if (!ctx.auth && ctx.transport === 'stdio') return null;
-  const clientId = ctx.auth?.clientId;
-  if (!clientId || typeof clientId !== 'string') {
+  // An admin credential bound to the brain owner keeps the operator's whole-queue view.
+  if (ctx.auth?.scopes && hasScope(ctx.auth.scopes, 'admin') && currentCallerAccess().owner) return null;
+  const owner = jobOwnerKey(ctx.auth, ctx.endUser);
+  if (!owner) {
     throw scopeDeniedError({
       op: opName, required: ['admin'], auth: ctx.auth, transport: ctx.transport === 'http' ? 'http' : 'stdio',
-      message: `${opName} without admin scope requires an authenticated OAuth client identity.`,
+      message: `${opName} over a remote connection requires an authenticated client identity.`,
       legacy_error: 'permission_denied',
     });
   }
-  return clientId;
+  return owner;
 }
 
 function listJobsFix(why: string): Action {
@@ -129,7 +123,7 @@ function jobStateError(id: unknown, message: string, need: string): OperationErr
  */
 export async function assertJobOwned(ctx: OperationContext, id: number, owner: string): Promise<void> {
   const rows = await ctx.engine.executeRaw<{ id: number }>(
-    `SELECT id FROM minion_jobs WHERE id = $1 AND data->>'__owner_client_id' = $2 AND ${jobActorSql(3)}`,
+    `SELECT id FROM minion_jobs WHERE id = $1 AND ${jobOwnerSql()} = $2 AND ${jobActorSql(3)}`,
     [id, owner, ...callerJobActor()],
   );
   if (rows.length === 0) {
@@ -146,11 +140,43 @@ function noWorkerSurface(ctx: OperationContext, e: NoEmbedBackfillWorkerSurfaceE
     { fix: known ? fix : { ...fix, inputs: [{ name: 'source-id', how: 'The source to embed (`gbrain sources list` shows them).' }] } });
 }
 
+/** Airteam fork: config keys for remote submission of protected job names (default: none, upstream behavior). */
+export const REMOTE_PROTECTED_ALLOW_KEY = 'jobs.remote_protected_allow';
+export const REMOTE_PROTECTED_MAX_USD_KEY = 'jobs.remote_max_usd';
+/** Protected names no config can open to remote callers: shell runs host commands in the pod holding provider keys. */
+export const NEVER_REMOTE_JOB_NAMES: ReadonlySet<string> = new Set(['shell']);
+const REMOTE_PROTECTED_DEFAULT_MAX_USD = 5;
+
+/**
+ * True when the host lists `name` (or '*') in jobs.remote_protected_allow, the
+ * name is not in NEVER_REMOTE_JOB_NAMES, and the caller holds the admin scope.
+ */
+export async function remoteProtectedJobAllowed(ctx: OperationContext, name: string): Promise<boolean> {
+  if (NEVER_REMOTE_JOB_NAMES.has(name)) return false;
+  const { hasScope } = await import('../scope.ts');
+  if (!hasScope(ctx.auth?.scopes ?? [], 'admin')) return false;
+  const listed = ((await ctx.engine.getConfig(REMOTE_PROTECTED_ALLOW_KEY)) ?? '').split(',').map(n => n.trim()).filter(Boolean);
+  return listed.includes('*') || listed.includes(name);
+}
+
+/** Spend cap for one remotely submitted protected job: min(caller max_usd, jobs.remote_max_usd ?? $5). */
+async function remoteProtectedSpend(ctx: OperationContext, name: string, requested: unknown) {
+  const raw = Number.parseFloat((await ctx.engine.getConfig(REMOTE_PROTECTED_MAX_USD_KEY)) ?? '');
+  const hostCap = Number.isFinite(raw) && raw >= 0 ? raw : REMOTE_PROTECTED_DEFAULT_MAX_USD;
+  const callerCap = typeof requested === 'number' && Number.isFinite(requested) && requested >= 0 ? requested : undefined;
+  const cap = callerCap !== undefined ? Math.min(callerCap, hostCap) : hostCap;
+  const { jobSpendAuthorization } = await import('../minions/spend-authorization.ts');
+  return jobSpendAuthorization(
+    { consented_effects: ['paid'], cap_usd: cap, cap_source: callerCap !== undefined && callerCap <= hostCap ? 'user' : 'default', via: 'max_usd' },
+    { command: `mcp submit_job ${name}`, of: 1 },
+  );
+}
+
 const submit_job: Operation = {
   name: 'submit_job',
   idempotent: false,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: 'Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source. Other kinds require local CLI or a dedicated operation.',
+  description: 'Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus subagent when the host lists it in jobs.remote_protected_allow (it runs with your own access and visibility, under a spend cap; brain-wide maintenance kinds and shell are refused). Other kinds require local CLI or a dedicated operation.',
   params: {
     name: { type: 'string', required: true, description: 'Remote job type: sync, import, lint, or lint-fix. Local CLI also supports other registered types.' },
     data: { type: 'object', description: 'Remote sync accepts optional pull/noPull (one boolean); other remote jobs accept no parameters. Source and paths are derived from the grant.' },
@@ -159,6 +185,7 @@ const submit_job: Operation = {
     max_attempts: { type: 'number', description: 'Max retry attempts (default: 3)' },
     delay: { type: 'number', description: 'Delay in ms before eligible' },
     timeout_ms: { type: 'number', description: 'Per-job wall-clock timeout in ms; aborted job goes to dead' },
+    max_usd: { type: 'number', description: 'Remote protected jobs only: spend cap in USD for this job; never above the host cap jobs.remote_max_usd (default 5).' },
     lock_duration_ms: { type: 'number', description: 'Per-job lock lease in ms (#4145). Out-of-range values are clamped to [5000, 3600000] — remote writers cannot pin an immortal lock. Omit to use the handler-type default (300s for long LLM handlers) or the worker default (30s).' },
   },
   mutating: true,
@@ -166,7 +193,14 @@ const submit_job: Operation = {
   handler: async (ctx, p) => {
     const name = typeof p.name === 'string' ? p.name.trim() : '';
     let jobData = { ...((p.data as Record<string, unknown>) || {}) };
-    const remoteSubmission = ctx.remote !== false ? await prepareRemoteJob(ctx, name, p.data) : undefined;
+    const { isProtectedJobName } = await import('../minions/protected-names.ts');
+    // Airteam fork: a protected name the host opened to remote admin callers skips the generic
+    // remote-job path (sync/import/lint only) and is queued as trusted work under a spend cap.
+    const remoteProtected = ctx.remote !== false && isProtectedJobName(name) && await remoteProtectedJobAllowed(ctx, name);
+    // The job runs with the submitter's own access (remote-caller-authority.ts); unconfinable types are refused there.
+    const confined = remoteProtected ? await (await import('../minions/remote-caller-authority.ts')).prepareRemoteCallerJob(ctx, name, p.data) : undefined;
+    if (confined) jobData = confined.data;
+    const remoteSubmission = ctx.remote !== false && !remoteProtected ? await prepareRemoteJob(ctx, name, p.data) : undefined;
     if (remoteSubmission) jobData = remoteSubmission.data;
     const translateAdmissionError = (e: unknown): never => {
       if (e instanceof InvalidEmbedBackfillSourceIdError) {
@@ -190,12 +224,11 @@ const submit_job: Operation = {
     // (the second is MinionQueue.add's check). Independent of the worker-side
     // GBRAIN_ALLOW_SHELL_JOBS env flag — even if that flag is on, MCP callers
     // cannot submit protected-type jobs.
-    const { isProtectedJobName } = await import('../minions/protected-names.ts');
     // F7b fail-closed: anything that is not strictly false (i.e., remote=true OR
     // the field somehow leaks in undefined despite the required type) rejects
     // protected job submissions. Closes the HTTP MCP shell-job RCE that surfaced
     // when the HTTP transport's OperationContext literal forgot to set remote.
-    if (ctx.remote !== false && isProtectedJobName(name)) {
+    if (ctx.remote !== false && isProtectedJobName(name) && !remoteProtected) {
       throw opError('permission_denied', `'${name}' jobs cannot be submitted over MCP (CLI-only for security)`,
         'Protected job types run only from the trusted local CLI on the brain host; the user or host operator submits it there (command in fix).',
         { fix: { ...hostFix(ctx, ['gbrain', 'jobs', 'submit', name, '--params', '<params>'], `'${name}' jobs can execute host commands, so only the brain host's own CLI may queue them.`),
@@ -208,6 +241,7 @@ const submit_job: Operation = {
     // name. Strict `=== false` so an untyped/cast context can't escalate.
     const trusted = remoteSubmission
       ? { submissionAuthority: remoteSubmission.authority }
+      : confined ? { submissionAuthority: confined.authority, allowProtectedSubmit: true, spendAuthorization: await remoteProtectedSpend(ctx, name, p.max_usd) }
       : ctx.remote === false && isProtectedJobName(name) ? { allowProtectedSubmit: true } : undefined;
 
     // v0.35.8.0: pre-enqueue shell-job validation, parity with the CLI submit
@@ -591,9 +625,9 @@ const get_agent_job: Operation = {
          FROM minion_jobs j
         WHERE j.id = $1
           AND j.name = 'subagent'
-          AND j.data->>'__owner_client_id' = $2
+          AND ${jobOwnerSql('j')} = $2
           AND ${jobActorSql(3, 'j')}`,
-      [id, clientId, ...callerJobActor()],
+      [id, jobOwnerKey(ctx.auth, ctx.endUser) ?? clientId, ...callerJobActor()],
     );
     if (rows.length === 0) {
       // Uniform envelope: foreign-owned and nonexistent ids are
@@ -632,7 +666,7 @@ const get_job: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: 'Get job status and details by ID. Agent-scoped tokens (no admin) see only jobs they own.',
+  description: 'Get job status and details by ID. Remote callers see only jobs they submitted.',
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
@@ -659,7 +693,7 @@ const wait_job: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: `Wait until a job is completed, failed, dead or cancelled (at most ${WAIT_JOB_MAX_S} s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Agent-scoped tokens (no admin) wait only on jobs they own.`,
+  description: `Wait until a job is completed, failed, dead or cancelled (at most ${WAIT_JOB_MAX_S} s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Remote callers wait only on jobs they submitted.`,
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
     timeout_s: { type: 'number', description: `Seconds to wait (default 30, at most ${WAIT_JOB_MAX_S}).` },
@@ -694,7 +728,7 @@ const list_jobs: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: 'List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope (agent-scoped tokens see only jobs they own).',
+  description: 'List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope; remote callers see only jobs they submitted (agent-scoped tokens too).',
   params: {
     status: { type: 'string', description: 'Filter by status (waiting, active, completed, failed, delayed, dead, cancelled)' },
     queue: { type: 'string', description: 'Filter by queue name' },
@@ -806,7 +840,7 @@ const get_job_progress: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: { exempt: 'admin-scoped job introspection: job params and results are operator data, not retrieved brain text' },
-  description: 'Get structured progress for a running job. Agent-scoped tokens (no admin) see only jobs they own.',
+  description: 'Get structured progress for a running job. Remote callers see only jobs they submitted.',
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
@@ -835,6 +869,8 @@ const pause_job: Operation = {
   scope: 'admin',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'pause_job', id: p.id };
+    const owner = agentOwnerFence(ctx, 'pause_job');
+    if (owner !== null) await assertJobOwned(ctx, p.id as number, owner);
     const { MinionQueue } = await import('../minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
     const job = await queue.pauseJob(p.id as number);
@@ -923,6 +959,8 @@ const send_job_message: Operation = {
             inputs: [{ name: 'arguments', how: 'The JSON arguments you passed: the job id and the payload to send.' }] } },
         );
       }
+      const owner = agentOwnerFence(ctx, 'send_job_message');
+      if (owner !== null) await assertJobOwned(ctx, p.id as number, owner);
       const sender = `mcp:${clientId.slice(0, 8)}`;
       // The queue-level sender auth only admits in-band identities ('admin' /
       // the parent job id) — see MinionQueue.sendMessage. The op layer has

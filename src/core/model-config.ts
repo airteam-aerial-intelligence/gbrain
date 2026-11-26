@@ -23,6 +23,7 @@
 import type { ConfigReader } from './config-snapshot.ts';
 import { openrouterModelSupportsSubagentLoop } from './ai/openrouter-families.ts';
 import { splitProviderModelId } from './model-id.ts';
+import { assertModelAllowed } from './ai/model-deny.ts';
 import type { GBrainConfig } from './config.ts';
 import { loadConfig } from './config.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
@@ -447,6 +448,16 @@ export function describeResolveOrigin(
  * unservable Anthropic default.
  */
 export async function resolveModelDetailed(
+  engine: ConfigReader | null,
+  opts: ResolveModelOpts,
+): Promise<ResolvedModel> {
+  // Airteam fork: a banned model (flag, config default, alias, env) fails at resolution with a clear error.
+  const resolved = await resolveModelDetailedUnchecked(engine, opts);
+  assertModelAllowed(resolved.model, opts.configKey ?? (opts.tier ? `tier:${opts.tier}` : 'model'));
+  return resolved;
+}
+
+async function resolveModelDetailedUnchecked(
   engine: ConfigReader | null,
   opts: ResolveModelOpts,
 ): Promise<ResolvedModel> {

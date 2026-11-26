@@ -4252,7 +4252,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source. Other kinds require local CLI or a dedicated operation.",
+    "description": "Submit a background job. Remote callers may submit sync, import, lint or lint-fix for their authenticated filesystem source, plus subagent when the host lists it in jobs.remote_protected_allow (it runs with your own access and visibility, under a spend cap; brain-wide maintenance kinds and shell are refused). Other kinds require local CLI or a dedicated operation.",
     "params": {
       "name": {
         "type": "string",
@@ -4283,6 +4283,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "number",
         "description": "Per-job wall-clock timeout in ms; aborted job goes to dead"
       },
+      "max_usd": {
+        "type": "number",
+        "description": "Remote protected jobs only: spend cap in USD for this job; never above the host cap jobs.remote_max_usd (default 5)."
+      },
       "lock_duration_ms": {
         "type": "number",
         "description": "Per-job lock lease in ms (#4145). Out-of-range values are clamped to [5000, 3600000] — remote writers cannot pin an immortal lock. Omit to use the handler-type default (300s for long LLM handlers) or the worker default (30s)."
@@ -4299,7 +4303,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "Get job status and details by ID. Agent-scoped tokens (no admin) see only jobs they own.",
+    "description": "Get job status and details by ID. Remote callers see only jobs they submitted.",
     "params": {
       "id": {
         "type": "number",
@@ -4318,7 +4322,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Agent-scoped tokens (no admin) wait only on jobs they own.",
+    "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Remote callers wait only on jobs they submitted.",
     "params": {
       "id": {
         "type": "number",
@@ -4341,7 +4345,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope (agent-scoped tokens see only jobs they own).",
+    "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope; remote callers see only jobs they submitted (agent-scoped tokens too).",
     "params": {
       "status": {
         "type": "string",
@@ -4423,7 +4427,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
     },
-    "description": "Get structured progress for a running job. Agent-scoped tokens (no admin) see only jobs they own.",
+    "description": "Get structured progress for a running job. Remote callers see only jobs they submitted.",
     "params": {
       "id": {
         "type": "number",

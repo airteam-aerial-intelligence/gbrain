@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertModelAllowed, DeniedModelError } from './model-deny.ts';
 
 export interface AIInvocation {
   operation: string;
@@ -126,12 +127,16 @@ function notifyObservers(event: AIInvocationEvent): void {
 export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>,
   rejected?: (error: unknown) => AIInvocationUsage | null): Promise<T> {
   const meter = meters.getStore();
-  if (observers.size === 0 && !meter) return admitAndRun(call, run, usage, rejected);
+  // Airteam fork: banned models never reach a provider, guarded or not. When
+  // observed, the denial is checked inside the try so it surfaces as a
+  // `refused` event (logged with its error class, never recorded or metered).
+  if (observers.size === 0 && !meter) { assertModelAllowed(call.model, call.operation); return admitAndRun(call, run, usage, rejected); }
   const startedAt = Date.now();
   let outcome: AIInvocationEvent['outcome'] = 'error';
   let measured: AIInvocationUsage | null = null;
   let errorClass: string | undefined;
   try {
+    assertModelAllowed(call.model, call.operation);
     const result = await admitAndRun(call, run, usage, rejected);
     // A fetch-based call resolves with the Response even on HTTP 429/5xx: the
     // caller throws or degrades afterwards, so observe that as an error here
@@ -142,7 +147,7 @@ export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usa
     try { measured = await usage(result); } catch { measured = null; }
     return result;
   } catch (error) {
-    if (isAIInvocationPolicyError(error)) outcome = 'refused';
+    if (isAIInvocationPolicyError(error) || error instanceof DeniedModelError) outcome = 'refused';
     errorClass = errorClassOf(error);
     throw error;
   } finally {
