@@ -24,8 +24,18 @@ export function confineRemoteCallerTool(a: RemoteCallerAuthority, op: Operation,
   opCtx.auth = { token: '', ...auth } as OperationContext['auth'];
   opCtx.sourceId = a.grant.sourceId;
   opCtx.remote = true;
-  if (auth.takesHoldersAllowList) opCtx.takesHoldersAllowList = [...auth.takesHoldersAllowList];
-  else delete opCtx.takesHoldersAllowList;
+  const holders = narrowHolders(opCtx.takesHoldersAllowList, auth.takesHoldersAllowList);
+  if (holders) opCtx.takesHoldersAllowList = holders;
   if (a.grant.endUser) opCtx.endUser = a.grant.endUser;
   return a;
+}
+
+/**
+ * Take holders a confined tool call may read: the submitting credential's list, never wider than a list the
+ * context already carries (intersection; `[]` stays deny-all). With neither list nothing is set, so readHolders
+ * applies the same fail-closed `['world']` default MCP dispatch applies to that credential.
+ */
+export function narrowHolders(current: readonly string[] | undefined, credential: readonly string[] | undefined): string[] | undefined {
+  if (!credential) return current ? [...current] : undefined;
+  return current ? credential.filter(h => current.includes(h)) : [...credential];
 }

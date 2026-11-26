@@ -30,6 +30,7 @@ import { buildBrainTools } from '../src/core/minions/tools/brain-allowlist.ts';
 import { APPLICATION_AUTHORITY, parseSubmissionAuthority, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import { mintLegacyToken } from '../src/core/token-mint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
+import { narrowHolders } from '../src/core/minions/remote-caller-tool.ts';
 
 const HOST = 'openai:gpt-6.1-sol';
 const OTHER = 'openai:gpt-5.5';
@@ -287,5 +288,17 @@ describe('a confined remote job runs with the submitter\'s visibility', () => {
     expect((await list.handler(bob, {})) as unknown[]).toEqual([]);
     const local = { ...alice, remote: false, auth: undefined } as OperationContext;
     expect(((await list.handler(local, {})) as unknown[]).length).toBe(1);
+  });
+});
+
+describe('remote_caller tool calls narrow take holders, never widen them', () => {
+  test('narrowHolders: credential list, intersected with any list already on the context; deny-all stays deny-all', () => {
+    expect(narrowHolders(undefined, undefined)).toBeUndefined();
+    expect(narrowHolders(undefined, ['world', 'alice-example'])).toEqual(['world', 'alice-example']);
+    expect(narrowHolders(['world'], ['world', 'alice-example'])).toEqual(['world']);
+    expect(narrowHolders(['world', 'bob-example'], undefined)).toEqual(['world', 'bob-example']);
+    expect(narrowHolders(['bob-example'], ['world'])).toEqual([]);
+    expect(narrowHolders([], ['world'])).toEqual([]);
+    expect(narrowHolders(['world'], [])).toEqual([]);
   });
 });
