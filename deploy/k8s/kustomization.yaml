@@ -1,0 +1,25 @@
+# Generic kustomize base for running gbrain on Kubernetes:
+#   Deployment gbrain         MCP server (serve), owner of the git-backed source
+#   Deployment gbrain-worker  background job worker (gbrain jobs work)
+#   CronJob gbrain-dream      nightly dream cycle
+#   CronJob gbrain-slack-sync periodic `sync` job submit for a Slack source
+#
+# Deployment-specific values (namespace, knowledge repo, git identity, Slack
+# source ids, time zone, ...) are meant to be set by the consumer as kustomize
+# patches on top of this base. See deploy/README.md.
+#
+# newTag below is rewritten by .github/workflows/airteam-deploy.yml on every
+# push; do not edit it by hand.
+#
+# Do NOT add commonLabels/labels transformers here: Deployment selectors are
+# immutable and NetworkPolicies may select pods by app.kubernetes.io/name.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gbrain.yaml
+  - gbrain-worker.yaml
+  - gbrain-dream.yaml
+  - gbrain-slack-sync.yaml
+images:
+  - name: ghcr.io/airteam-aerial-intelligence/gbrain
+    newTag: replaced-by-first-ci-run

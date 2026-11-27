@@ -1,0 +1,70 @@
+# Job worker: Postgres brains run background jobs (facts-absorb, embed,
+# extract, Slack sync, ...) on a separate `gbrain jobs work` process. Without it
+# those jobs wait forever. Non-owner host: ephemeral home, no knowledge checkout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gbrain-worker
+  labels:
+    app.kubernetes.io/name: gbrain-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gbrain-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gbrain-worker
+    spec:
+      serviceAccountName: gbrain
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/airteam-aerial-intelligence/gbrain
+          args:
+            - worker
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gbrain-anthropic
+                  key: ANTHROPIC_API_KEY
+          envFrom:
+            - secretRef:
+                name: gbrain-env
+                optional: false
+            # Slack bot token (initiative channels, ideas intake).
+            - secretRef:
+                name: gbrain-slack
+                optional: true
+            - configMapRef:
+                name: gbrain-settings
+                optional: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: gbrain-home
+              mountPath: /home/gbrain
+      volumes:
+        - name: gbrain-home
+          emptyDir: {}
