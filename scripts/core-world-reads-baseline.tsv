@@ -1303,3 +1303,4 @@ src/core/ops/file-transfer.ts	process_env	1	GBRAIN_REMOTE_UPLOAD_MAX_BYTES: the 
 src/core/take-proposal-schema.ts	module_collection	1	per-engine memo that the review columns exist (fork-only idempotent DDL; upstream carries a migration)
 src/core/ai/usage-observability.ts	als_store	1	W2: engine scope (decision E) replaces the usage-scope async context
 src/core/ai/usage-observability.ts	process_env	2	W1: GBRAIN_USAGE_LOG default only; callers can pass env, engine settings take it over
+src/core/persistence/write-secrets.ts	process_env	1	GBRAIN_SECRETS_ON_WRITE tightens secrets.on_write for container deployments with no config file (fork); TODO(secrets-on-write): pass through engine settings

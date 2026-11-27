@@ -3171,6 +3171,7 @@
     "membership_inactive": 1,
     "membership_not_found": 1,
     "memory_setting_write_outcome_unknown": 1,
+    "merge_plan_missing": 1,
     "merge_recommended": 1,
     "method_not_allowed": 1,
     "migration_declined": 3,
