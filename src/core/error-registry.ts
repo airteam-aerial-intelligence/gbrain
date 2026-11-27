@@ -894,6 +894,7 @@ export const CODES = {
   projection_pending: { class: 'retryable', summary: "The current text projection is not ready." },
   initiative_not_found: { class: 'caller', summary: "No initiative page with that slug exists in the initiatives source." },
   initiative_not_active: { class: 'caller', summary: "The initiative is already finished (done or cancelled), so it cannot be changed this way." },
+  merge_plan_missing: { class: 'caller', summary: "The finished initiative has no merge plan yet; the finish job writes it." },
   initiative_not_done: { class: 'caller', summary: "Only an initiative finished as done has a merge plan to apply." },
   slack_channel_not_found: { class: 'caller', summary: "The Slack app cannot see a channel with that name or id." },
   slack_bot_not_in_channel: { class: 'caller', summary: "The Slack bot is not a member of the channel, so it cannot read it; invite it first (/invite @<bot>)." },
