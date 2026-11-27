@@ -1,0 +1,80 @@
+# Slack connector sync: every 15 minutes queue one `sync` job per Slack source
+# for gbrain-worker (one sync per source at a time; a slow sync makes the next
+# submit a no-op). ONE CONTAINER PER SOURCE, named sync-<source id>. The base
+# ships a single container for a source with id `slack`; patch its name and
+# sourceId, and add one container per further source. Without a Slack source,
+# delete this CronJob with a patch (`$patch: delete`).
+# Sources are created once from the serve pod (docs/guides/initiatives.md):
+#   gbrain sources add <source id> --kind slack --channels-from initiatives
+#   gbrain sources add <source id> --kind slack --channels <id> --mode intake
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gbrain-slack-sync
+  labels:
+    app.kubernetes.io/name: gbrain-slack-sync
+spec:
+  schedule: "*/15 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gbrain-slack-sync
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: gbrain-slack-sync
+        spec:
+          restartPolicy: Never
+          serviceAccountName: gbrain
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sync-slack
+              image: ghcr.io/airteam-aerial-intelligence/gbrain
+              args:
+                - jobs
+                - submit
+                - sync
+                - --params
+                - '{"embed_reason":"slack-sync-cron","sourceId":"slack"}'
+              # Only the DB URL and settings: submitting a job needs no API key.
+              envFrom:
+                - secretRef:
+                    name: gbrain-env
+                    optional: false
+                - configMapRef:
+                    name: gbrain-settings
+                    optional: false
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 192Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: gbrain-home
+                  mountPath: /home/gbrain
+          volumes:
+            - name: gbrain-home
+              emptyDir: {}

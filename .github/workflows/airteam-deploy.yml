@@ -1,0 +1,106 @@
+# Continuous delivery for the `airteam` deploy branch: build the image from
+# deploy/Dockerfile, push it to ghcr.io, then pin the new tag in
+# deploy/k8s/kustomization.yaml and push that one-line commit back to
+# `airteam`. A GitOps controller watching deploy/k8s on `airteam` rolls it out.
+#
+# The bump commit is pushed with GITHUB_TOKEN, which never triggers another
+# workflow run; paths-ignore and [skip ci] are belt and braces.
+name: airteam-deploy
+
+on:
+  push:
+    branches: [airteam]
+    paths-ignore:
+      - deploy/k8s/kustomization.yaml
+  workflow_dispatch:
+
+concurrency:
+  group: airteam-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/gbrain
+
+jobs:
+  deploy:
+    name: Build, push, bump deploy tag
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: airteam
+          fetch-depth: 0
+
+      - name: Compute image tag
+        id: tag
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$VERSION" ]; then
+            echo "VERSION file is empty" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}-airteam.${RUN_NUMBER}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $TAG"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Bump deploy tag and push to airteam
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          FILE=deploy/k8s/kustomization.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin airteam
+            git reset --hard origin/airteam
+            sed -i -E "s|^([[:space:]]*newTag:).*|\1 ${TAG}|" "$FILE"
+            grep -qE "^[[:space:]]*newTag: ${TAG}$" "$FILE"
+            if git diff --quiet -- "$FILE"; then
+              echo "newTag already ${TAG}"
+              exit 0
+            fi
+            git add "$FILE"
+            git commit -m "chore(deploy): gbrain ${TAG} [skip ci]"
+            if git push origin HEAD:airteam; then
+              exit 0
+            fi
+            echo "push rejected (attempt ${attempt}), retrying on top of the new airteam head" >&2
+            sleep $((attempt * 5))
+          done
+          echo "could not push the tag bump" >&2
+          exit 1

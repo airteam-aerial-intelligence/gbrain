@@ -1,0 +1,217 @@
+# gbrain serve: MCP server (port 3131) and the canonical owner of the
+# git-backed knowledge checkout on PVC gbrain-knowledge. One replica: gbrain
+# runs in-process schedulers that are not meant to be multiplied. Recreate:
+# the PVC is RWO and two pods must never migrate at once.
+#
+# Referenced, not defined here (create them separately):
+#   ServiceAccount gbrain
+#   Secret gbrain-env        GBRAIN_DATABASE_URL (+ any other secret env)
+#   Secret gbrain-anthropic  ANTHROPIC_API_KEY
+#   Secret gbrain-slack, gbrain-carrier-webhook (optional)
+#   Secret gbrain-git-ssh    ssh key, known_hosts, config for the knowledge repo
+#   ConfigMap gbrain-settings          non-secret env
+#   ConfigMap gbrain-knowledge-setup   knowledge-setup.sh (init container)
+#   PVC gbrain-knowledge
+# Changes to those do not roll the pods; restart them:
+#   kubectl rollout restart deploy/gbrain
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gbrain
+  labels:
+    app.kubernetes.io/name: gbrain
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gbrain
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gbrain
+    spec:
+      serviceAccountName: gbrain
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        # Do not re-chmod the PVC on every start: a recursive fsGroup pass adds
+        # group read/write to gbrain's ownership markers (.gbrain-owner*.json,
+        # which must stay 0600), and gbrain then refuses every page write
+        # (recovery_required / ownership_record_not_private).
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # gbrain's RLS migrations need BYPASSRLS on its DB role, which some
+        # managed Postgres admin APIs cannot set. Idempotent; a no-op once set.
+        - name: grant-bypassrls
+          image: postgres:18-alpine
+          command:
+            - sh
+            - -c
+            - psql "$GBRAIN_DATABASE_URL" -v ON_ERROR_STOP=1 -qc 'ALTER ROLE "gbrain_user" BYPASSRLS;'
+          # Only the DB URL: the API keys stay out of this container.
+          env:
+            - name: GBRAIN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gbrain-env
+                  key: GBRAIN_DATABASE_URL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        # Git-backed default source: clone once, bind, harden, export pages
+        # that have no file yet. Script from ConfigMap gbrain-knowledge-setup.
+        # Patch the placeholder values below for your knowledge repo.
+        - name: knowledge-repo
+          image: ghcr.io/airteam-aerial-intelligence/gbrain
+          command:
+            - /bin/bash
+            - /opt/gbrain-knowledge/knowledge-setup.sh
+          env:
+            - name: GBRAIN_HOME
+              value: /data/gbrain/home
+            - name: GBRAIN_KNOWLEDGE_REPO_URL
+              value: git@github.com:example/knowledge.git
+            - name: GBRAIN_KNOWLEDGE_DIR
+              value: /data/gbrain/knowledge
+            - name: GBRAIN_GIT_USER_NAME
+              value: gbrain
+            - name: GBRAIN_GIT_USER_EMAIL
+              value: gbrain@example.invalid
+          envFrom:
+            - secretRef:
+                name: gbrain-env
+                optional: false
+            - configMapRef:
+                name: gbrain-settings
+                optional: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: gbrain-home
+              mountPath: /home/gbrain
+            - name: knowledge
+              mountPath: /data/gbrain
+            - name: git-ssh
+              mountPath: /home/gbrain/.ssh
+              readOnly: true
+            - name: knowledge-setup
+              mountPath: /opt/gbrain-knowledge
+              readOnly: true
+      containers:
+        - name: gbrain
+          image: ghcr.io/airteam-aerial-intelligence/gbrain
+          ports:
+            - name: http
+              containerPort: 3131
+          env:
+            # Persistent: this pod is the canonical owner of the knowledge checkout.
+            - name: GBRAIN_HOME
+              value: /data/gbrain/home
+            # OAuth issuer stays localhost on purpose: /admin only via port-forward.
+            - name: GBRAIN_PUBLIC_URL
+              value: http://localhost:3131
+            - name: GBRAIN_PORT
+              value: "3131"
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gbrain-anthropic
+                  key: ANTHROPIC_API_KEY
+          envFrom:
+            - secretRef:
+                name: gbrain-env
+                optional: false
+            # Slack bot token + signing secret.
+            - secretRef:
+                name: gbrain-slack
+                optional: true
+            # Webhook sink HMAC key.
+            - secretRef:
+                name: gbrain-carrier-webhook
+                optional: true
+            # Non-secret settings (e.g. GBRAIN_SECRETS_ON_WRITE=refuse).
+            - configMapRef:
+                name: gbrain-settings
+                optional: false
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          # init + schema migrations run before the server listens.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: gbrain-home
+              mountPath: /home/gbrain
+            # Page writes land here as Markdown, are committed and pushed.
+            - name: knowledge
+              mountPath: /data/gbrain
+            - name: git-ssh
+              mountPath: /home/gbrain/.ssh
+              readOnly: true
+      volumes:
+        # Holds only the config.json regenerated from env on every start.
+        - name: gbrain-home
+          emptyDir: {}
+        - name: knowledge
+          persistentVolumeClaim:
+            claimName: gbrain-knowledge
+        - name: git-ssh
+          secret:
+            secretName: gbrain-git-ssh
+            defaultMode: 288 # 0440
+        - name: knowledge-setup
+          configMap:
+            name: gbrain-knowledge-setup
+            defaultMode: 365 # 0555
