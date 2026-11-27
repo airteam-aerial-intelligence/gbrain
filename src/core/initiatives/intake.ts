@@ -11,7 +11,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { parseLlmJson } from '../llm-json.ts';
-import { findWriteSecret } from '../write-secret-guard.ts';
+import { scanText } from '../secret-scan.ts';
 import { IDEA_TYPE, today, type InitiativesConfig } from './model.ts';
 import { localContext, updatePage } from './store.ts';
 import { findSlackIdea, sectionOf, setSection, submitIdea, titleFromText, type IdeasDeps, type SimilarHit, type SubmitIdeaResult } from './ideas.ts';
@@ -88,7 +88,7 @@ function str(v: unknown): string | undefined {
 export async function handleIntakeMessage(engine: BrainEngine, cfg: InitiativesConfig, msg: IntakeMessage, deps: IdeasDeps = {}): Promise<IntakeOutcome> {
   const text = (msg.text ?? '').trim();
   if (!text || trivial(text) || ACK.test(text)) return { kind: 'skipped', reason: 'trivial' };
-  if (findWriteSecret(text)) return { kind: 'skipped', reason: 'secret_like' };
+  if (scanText(text).length > 0) return { kind: 'skipped', reason: 'secret_like' };
   if (await findSlackIdea(engine, cfg, msg.channel, msg.ts)) return { kind: 'skipped', reason: 'already_recorded' };
   const verdict = await classify(engine, text, deps);
   if (verdict === 'unparseable') return { kind: 'skipped', reason: 'unclassified' };
@@ -114,7 +114,7 @@ function slackDate(ts: string): string {
 export async function appendIdeaDiscussion(engine: BrainEngine, cfg: InitiativesConfig, ideaSlug: string,
   replies: Array<{ user?: string; userName?: string; text: string; ts: string }>): Promise<void> {
   const lines = [...replies]
-    .filter(r => r.text?.trim() && !findWriteSecret(r.text))
+    .filter(r => r.text?.trim() && !scanText(r.text).length)
     .sort((a, b) => Number(a.ts) - Number(b.ts) || a.ts.localeCompare(b.ts))
     .map(r => {
       const who = str(r.userName) ?? str(r.user) ?? 'someone';

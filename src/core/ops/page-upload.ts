@@ -11,6 +11,7 @@
  * admission, sanitizing and the revision check run as for content sent
  * inline. Never import from '../operations.ts' here (cycle).
  */
+import { normalizeSlug } from '../utils.ts';
 import { randomUUID } from 'node:crypto';
 import type { Operation, OperationContext } from './contract.ts';
 import { OperationError, opError } from './contract.ts';
@@ -31,7 +32,7 @@ import { readPageBodyPolicy } from '../page-body/limits.ts';
 import { contentRefusalError, loadImportSanityConfig } from '../import-screen.ts';
 import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
 import { admitPageAppend } from '../persistence/page-append.ts';
-import { findWriteSecretInParts, secretInWriteError, writeSecretGuardOn } from '../write-secret-guard.ts';
+import { screenUploadedSecrets } from '../persistence/write-secrets.ts';
 import {
   abortUpload, appendPart, expireIfLapsed, partBytes, partMaxFrameBytes, partSha256, readUpload, readUploadByRequest, reserveUpload,
   isStagingBodyRef, sealUpload, stagedSha256, stagedUploadParts, transitionUploads, uploadExpired, uploadNotFound, uploadPartFrameBytes, uploadPartLimit, type StagingBodyRef, type UploadMode, type UploadRow,
@@ -154,7 +155,7 @@ const begin_page_upload: Operation = {
     const sourceId = pageMutationSource(ctx, p, 'begin_page_upload');
     const mode = p.mode as UploadMode;
     if (!MODES.includes(mode)) throw invalidParam('mode must be create, replace or append.', 'Pass mode create for a new page, replace with expected_revision for an existing one, or append.');
-    const slug = typeof p.slug === 'string' ? p.slug.toLowerCase() : '';
+    const slug = typeof p.slug === 'string' ? normalizeSlug(p.slug) : '';
     validatePageSlug(slug);
     enforceClientSlugFence(ctx, slug, 'begin_page_upload');
     enforceSubagentSlugFence(ctx, slug, 'begin_page_upload');
@@ -196,6 +197,8 @@ const begin_page_upload: Operation = {
       throw opError('revision_required', `Page ${slug} already exists, so an upload with mode create cannot write it; nothing was staged.`,
         "Read the page with get_page body: 'none', then begin with mode replace and its revision as expected_revision.", { fix: pageFix(slug, sourceId) });
     }
+    // pages-02: a local begin that names no source must not stage a new page that already lives in exactly one other source.
+    if (mode === 'create') await (await import('../persistence/unsourced-put-fork.ts')).assertUnsourcedPutKeepsSource(ctx, sourceId, p, { targetHasRow: !!snapshot });
     if (mode !== 'create' && (!snapshot || snapshot.page.deleted_at)) {
       if (ctx.remote !== false) throw pageNotVisibleError();
       throw opError('page_not_found', `Page not found: ${slug}`, `An upload with mode ${mode} writes an existing page; begin with mode create to make it.`);
@@ -355,13 +358,6 @@ const commit_page_upload: Operation = {
           throw opError('invalid_params', 'The uploaded bytes do not match the sha256 declared at begin, so the upload was discarded and nothing was written.',
             'Begin again with the SHA-256 of exactly the content you send.');
         }
-        // secrets.on_write: the assembled body is scanned, so a secret split across parts is found; a refused upload is aborted.
-        const secret = ctx.remote !== false && await writeSecretGuardOn(ctx.engine)
-          ? await findWriteSecretInParts(stagedUploadParts(ctx.engine, { kind: 'staging', staging_id: row.id, sha256: row.declared_sha256, bytes: row.declared_bytes })) : null;
-        if (secret) {
-          await abortUpload(ctx.engine, row.id);
-          throw secretInWriteError(secret, 'commit_page_upload');
-        }
         row = { ...row, state: 'sealed' };
       }
     }
@@ -372,6 +368,15 @@ const commit_page_upload: Operation = {
       if (row.state === 'open') throw opError('write_pending', 'Another call is committing this upload.', 'Call commit_page_upload again with this upload_id.', { fix: statusFix(row.id) });
     }
     const bodyRef: StagingBodyRef = { kind: 'staging', staging_id: row.id, sha256: row.declared_sha256, bytes: row.declared_bytes };
+    // secrets.on_write: every call that would submit a sealed body screens it whole, including one that lost the seal
+    // race or resumes after a crash, so a secret split across parts is found; a refused upload is discarded.
+    if (!submitted) {
+      const secret = await screenUploadedSecrets(ctx, stagedUploadParts(ctx.engine, bodyRef));
+      if (secret) {
+        await abortUpload(ctx.engine, row.id);
+        throw secret;
+      }
+    }
     if (row.mode === 'append') {
       try {
         return await admitPageAppend(ctx, { slug: row.slug, source_id: row.source_id, request_id: row.client_request_id, body_ref: bodyRef,
@@ -393,7 +398,8 @@ const commit_page_upload: Operation = {
       if (ctx.remote !== false) await assertLargePageAdmission(ctx.engine, row.slug, row.source_id, params);
     }
     try {
-      return await submitPageMutation(ctx, { operation: 'put_page', params, stagedBody: true });
+      // pages-02: the source was fixed at begin, so a commit that names none re-checks that a new page was not meanwhile written in one other source.
+      return await submitPageMutation(ctx, { operation: 'put_page', params, stagedBody: true, ...(row.mode === 'create' ? { unsourcedForkGuard: true as const } : {}) });
     } catch (error) {
       if (row.mode === 'replace' && error instanceof OperationError && error.code === 'revision_conflict') throw revisionChanged(row.slug, row.source_id);
       throw error;

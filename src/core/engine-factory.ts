@@ -2,6 +2,7 @@ import type { BrainEngine } from './engine.ts';
 import type { EngineConfig } from './types.ts';
 import { registerChatUsageSink, makeEngineChatUsageSink } from './ai/chat-usage.ts';
 import { constructEngine } from './engine-construct.ts';
+import { shadowHomeUsed, shadowStateFor } from '../shadow/state.ts';
 
 /**
  * Create an engine instance based on config.
@@ -20,12 +21,32 @@ export async function createEngine(config: EngineConfig): Promise<BrainEngine> {
   // top-of-stack best-effort; the sink is fail-open, so a not-yet-migrated
   // engine never breaks a chat call. An engine opened from settings never
   // comes through here (engine-open.ts): its sink is its own.
-  const deregisterUsageSink = registerChatUsageSink(makeEngineChatUsageSink(engine), engine);
+  const usageSink = makeEngineChatUsageSink(engine);
+  const deregisterUsageSink = registerChatUsageSink(usageSink, engine);
   const origDisconnect = engine.disconnect.bind(engine);
   engine.disconnect = async (): Promise<void> => {
     deregisterUsageSink();
+    await usageSink.drain();
     await origDisconnect();
   };
 
-  return engine;
+  // Rust engine shadow mode (docs/ENGINES.md "Rust engine shadow mode"): off unless `gbrain engine shadow start`
+  // turned it on for this brain. Off costs one existsSync.
+  const shadow = shadowStateFor(config);
+  let out: BrainEngine = engine;
+  if (shadow) {
+    const { attachShadow } = await import('../shadow/attach.ts');
+    out = attachShadow(engine, shadow.dir, shadow.state);
+  }
+  // Shadow replay capture (docs/guides/shadow-replay.md): off unless `gbrain engine shadow capture on --yes`.
+  // A home that never used shadow mode has no shadow root and loads no capture module (one existsSync, as above).
+  const cs = shadowHomeUsed() ? await import('../shadow/capture-state.ts') : null;
+  const capture = cs?.captureStateFor(config);
+  if (capture) {
+    const { attachCapture } = await import('../shadow/capture.ts');
+    out = attachCapture(out, capture.cap);
+  }
+  const purgeWatch = cs?.capturePurgeWatchFor(config);
+  if (purgeWatch) (await import('../shadow/capture.ts')).watchPurges(purgeWatch);
+  return out;
 }

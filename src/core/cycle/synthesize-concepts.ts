@@ -25,7 +25,7 @@ import { resolveModel } from '../model-config.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
-import { upsertExtractRollup } from '../extract/rollup-writer.ts';
+import { providerHaltReason, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { chat as gatewayChat, isThinkingModel, THINKING_MODEL_MAX_OUTPUT_TOKENS } from '../ai/gateway.ts';
 import { createGlobalLlmHaltTracker, haltedClassOf, type GlobalLlmErrorClass } from '../ai/errors.ts';
 import { canonicalLookup, type ModelPricing } from '../model-pricing.ts';
@@ -533,7 +533,7 @@ export async function runPhaseSynthesizeConcepts(
     await stopIfAborted();
     if (!opts.dryRun) {
       // #9653: managed, the tombstone's retention purge commits before the fresh page is queued; otherwise nothing more is written.
-      const purged = rebuild && maintenance ? await submitHeldConceptPurge(engine, src, conceptSlug, rebuild) : true;
+      const purged = rebuild && maintenance ? await submitHeldConceptPurge(engine, maintenance, src, conceptSlug, rebuild) : true;
       if (purged !== true) { rebuildDeferred.push({ concept: conceptSlug, reason: purged }); continue; }
       // #5525: tighten-only — a concept already private stays private.
       const prior = rebuild ? null : await engine.getPage(conceptSlug, { sourceId: src });
@@ -558,7 +558,7 @@ export async function runPhaseSynthesizeConcepts(
       // world, so a strict source never commits an intermediate private page.
       const covered = !rebuild && visibility === 'world' && await conceptProvenanceCovers(engine, src, conceptSlug, group.atomSlugs);
       const write: ConceptWrite = { concept: group.conceptSlug, conceptSlug, atomSlugs: group.atomSlugs, visibility, covered, synthesisMode, synthesized, narrative,
-        revision: rebuild ? null : existingSnapshot?.revision ?? null, baseline: existing?.compiled_truth ?? '', ...(rebuild ? { rebuild: maintenance ? 'purged' as const : rebuild } : {}) };
+        revision: rebuild ? null : existingSnapshot?.revision ?? null, baseline: existing?.compiled_truth ?? '', ...(rebuild ? { rebuild: maintenance ? { purgedMembers: rebuild.members } : rebuild } : {}) };
       if (rebuild) rebuilds.push(write);
       // GBRA-60: a managed run's concepts publish in batches (concept-writes.ts), each one publication group on Postgres.
       await stopIfAborted();
@@ -611,7 +611,7 @@ export async function runPhaseSynthesizeConcepts(
       source_id: opts.sourceId ?? 'default',
       cost_delta: estimatedSpendUsd,
       round_completed_delta: failures.length === 0 && publicationDeferred.length === 0 && publicationHeld.length === 0 && publicationPending.length === 0 ? 1 : 0,
-      halt_delta: failures.length > 0 ? 1 : 0, halt_reason: 'item_error',
+      halt_delta: failures.length > 0 ? 1 : 0, halt_reason: providerHaltReason(abortedGlobalError) ?? 'item_error',
     });
   }
 

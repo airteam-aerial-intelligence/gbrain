@@ -1661,6 +1661,30 @@
           }
         ]
       },
+      "clearCodeTraversalCache": {
+        "allSources": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          }
+        ],
+        "sourceId": [
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "deleteCodeEdgesForChunks": {
         "default": [
           {
@@ -1773,6 +1797,19 @@
           }
         ]
       },
+      "getCodeTraversalCache": {
+        "default": [
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "getEdgesByChunk": {
         "default": [
           {
@@ -1817,6 +1854,19 @@
           },
           {
             "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "putCodeTraversalCache": {
+        "default": [
+          {
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1957,7 +2007,7 @@
       "findTrajectory": {
         "default": [
           {
-            "paramCount": 3,
+            "paramCount": 4,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1968,7 +2018,7 @@
         ],
         "event": [
           {
-            "paramCount": 3,
+            "paramCount": 4,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1979,7 +2029,7 @@
         ],
         "sourceIds+metric+since+until": [
           {
-            "paramCount": 6,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2179,7 +2229,7 @@
       "listFactsByEntity": {
         "allFilters": [
           {
-            "paramCount": 7,
+            "paramCount": 14,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2190,7 +2240,7 @@
         ],
         "default": [
           {
-            "paramCount": 4,
+            "paramCount": 8,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2368,6 +2418,30 @@
     "files": {
       "getFile": {
         "default": [
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "listFiles": {
+        "default": [
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "page_slug": [
           {
             "paramCount": 2,
             "unsafeOptions": {
@@ -3554,7 +3628,7 @@
       "listEntityKeyRows": {
         "after": [
           {
-            "paramCount": 5,
+            "paramCount": 12,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -3565,7 +3639,7 @@
         ],
         "default": [
           {
-            "paramCount": 5,
+            "paramCount": 12,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4626,7 +4700,16 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 3,
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4699,6 +4782,33 @@
           },
           {
             "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4961,6 +5071,28 @@
             "via": "unsafe"
           }
         ],
+        "owner-contact": [
+          {
+            "paramCount": 11,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "owner-contact-no-owner": [
+          {
+            "paramCount": 10,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
         "sourceId": [
           {
             "paramCount": 4,
@@ -5030,6 +5162,32 @@
         "default": [
           {
             "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "lockSourceRow": {
+        "default": [
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "readSourceRow": {
+        "default": [
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,

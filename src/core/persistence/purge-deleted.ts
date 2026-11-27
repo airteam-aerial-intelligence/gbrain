@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { assertPurgeAge } from '../engine-errors.ts';
 import { loadConfig } from '../config.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { requireConsent, type ConsentRequest } from '../consent.ts';
@@ -10,7 +11,7 @@ import { isWriteCapacityWait } from './admission-retry.ts';
 import { readBackgroundPauseShare, resolveAdmissionOrigin } from './admission-origin.ts';
 import { withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
-import { linkStreamSlugs } from './page-purge.ts';
+import { linkStreamSlugs, redactExpiredPageJournal } from './page-purge.ts';
 import { identityDowngradePurgeHold } from '../sync-identity-downgrades.ts';
 import { atomRetirementPurgeHold } from './atom-retirement-hold.ts';
 import { derivedRetirementPurgeHold } from './derived-retirement-hold.ts';
@@ -54,6 +55,7 @@ import { keptReason, readHeldConcepts, type RebuildKept } from './concept-rebuil
 import { scrubPurgedNameStores } from './purge-name-stores.ts';
 import { pageSecretOccurrences, scrubPurgedSlugHolds, scrubPurgedSlugStores } from './purge-slug-stores.ts';
 import { expireGonePageFacts } from '../facts/gone-page-facts.ts';
+import { declarePersistenceProtocol } from './protocol.ts';
 import { maintenanceTransaction } from './attribution.ts';
 import { maintenancePublishWaitMs } from './maintenance-wait.ts';
 import { DreamWriteDeferralPass, pendingRequestId, writeStatusCommand, DREAM_WRITE_DEFERRED_CODE } from '../cycle/dream-write-deferral.ts';
@@ -175,7 +177,8 @@ interface RecordedExpiry { slugs: string[]; exclude: number[]; blocked: DeletedP
  * PURGE_PARK_LIMIT failures it is parked and skipped, like the managed purge's; a transient one is retried next run.
  */
 async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: number, retryParked: boolean, held: ReadonlySet<number>, only?: PurgeFilter): Promise<RecordedExpiry> {
-  const hours = String(Math.max(0, Math.floor(olderThanHours)));
+  assertPurgeAge(olderThanHours);
+  const hours = String(Math.floor(olderThanHours));
   const { parkUncarriedInPurge } = await import('../repair/origin-carry.ts');
   await prunePurgeParks(engine);
   const run = new ItemRun('purge.recorded_tombstones');
@@ -193,6 +196,7 @@ async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: num
     try {
       const publicationId = randomUUID(), report = { appended: 0 };
       const deleted = await maintenanceTransaction(engine, async tx => {
+        await declarePersistenceProtocol(tx);
         const slugs = [...new Set([row.slug, ...await linkStreamSlugs(tx, row.source_id, row.id)])].sort();
         await tx.lockPageKeys(slugs.map(slug => ({ sourceId: row.source_id, slug })));
         return withBeliefBatch(tx, { sourceId: row.source_id, slugs, publicationId, op: 'purge_deleted_pages', hardDeleteEvent: 'page.expired', report },
@@ -205,8 +209,9 @@ async function expireRecordedTombstones(engine: BrainEngine, olderThanHours: num
             if (gone.length > 0) {
               await scrubPurgedSlugs(tx, row.source_id, [row.slug]);
               await scrubPurgedNameStores(tx, row.source_id, [row.slug]);
+              await scrubPurgedSlugHolds(tx, row.source_id, [{ slug: row.slug, id: row.id, deletedAt: gone[0].deleted_at }]); // before the slug stores: their scrub removes the rename record the hold sweep reads
               await scrubPurgedSlugStores(tx, row.source_id, [row.slug], { secretOccurrences: secrets.map(o => o.id) });
-              await scrubPurgedSlugHolds(tx, row.source_id, [{ slug: row.slug, deletedAt: gone[0].deleted_at }]);
+              await redactExpiredPageJournal(tx, row.source_id, [row.slug]);
             }
             return gone.length > 0;
           });
@@ -285,9 +290,10 @@ export function purgeHoldsSql(page: string, source: string, released?: string): 
  * origins it parks; the run itself reads the parks as they are.
  */
 export async function selectPurgeCandidates(engine: BrainEngine, olderThanHours: number, opts: { retryParked?: boolean; automatic?: boolean; forecast?: CarryForecast; model?: boolean } = {}): Promise<PurgeSelection> {
+  assertPurgeAge(olderThanHours);
   const release = (opts.forecast?.release ?? []).map(origin => origin.id), hold = (opts.forecast?.hold ?? []).map(origin => origin.id);
   if (!await managedPersistenceEnabled(engine)) {
-    const parked = (await recordedTombstones(engine, String(Math.max(0, Math.floor(olderThanHours))), release))
+    const parked = (await recordedTombstones(engine, String(Math.floor(olderThanHours)), release))
       .filter((row): row is RecordedTombstone & { park: PurgePark } => isParked(row.park));
     const skipped = new Set(opts.retryParked ? [] : parked.map(row => row.id));
     const unreviewed = (await readUnreviewedSyncTombstones(engine, olderThanHours)).filter(row => !skipped.has(row.id));
@@ -406,6 +412,10 @@ export function purgePhaseNote(result: DeletedPagePurge): string {
 export type PurgeFilter = (page: { source_id: string; slug: string }) => boolean;
 
 export async function purgeDeletedPagesCoordinated(engine: BrainEngine, olderThanHours: number, opts: { retryParked?: boolean; automatic?: boolean; only?: PurgeFilter; release?: readonly number[] } = {}): Promise<DeletedPagePurge> {
+  // Refuse an age that is not a finite number of hours, 0 or more, before the carry, the recorded-tombstone expiry or
+  // any other step runs: a negative or NaN age used to clamp to 0 there and hard-delete every recorded tombstone even
+  // though the engine purge itself refuses it (engine-errors.ts PurgeAgeError).
+  assertPurgeAge(olderThanHours);
   const { release = [], ...purge } = opts;
   // GST-2766: an owner purge a park held is recorded apart from the park, so the carry clearing the park never drops it.
   await releaseStaleHolds(engine);
@@ -481,6 +491,7 @@ async function purgeExpired(engine: BrainEngine, olderThanHours: number, opts: {
     const exclude = [...recorded.exclude, ...kept.map(row => row.id), ...owed, ...rederive];
     const reparked = [...recorded.reparked];
     const result = await maintenanceTransaction(engine, async tx => {
+      await declarePersistenceProtocol(tx);
       const unlisted = opts.only ? (await tx.executeRaw<{ id: number; source_id: string; slug: string }>(
         `SELECT id, source_id, slug FROM pages WHERE deleted_at IS NOT NULL AND deleted_at < now() - ($1 || ' hours')::interval`,
         [String(Math.max(0, Math.floor(olderThanHours)))])).filter(page => !opts.only!(page)).map(page => Number(page.id)) : [];
@@ -490,7 +501,11 @@ async function purgeExpired(engine: BrainEngine, olderThanHours: number, opts: {
         [String(Math.max(0, Math.floor(olderThanHours)))]);
       // GST-2689: the recheck parks, in this transaction, each origin a page written after the carry still depends on; the delete's hold skips it.
       reparked.push(...await parkUncarriedInPurge(tx, expiring.map(page => Number(page.id)).filter(id => !skip.has(id))));
-      return tx.purgeDeletedPages(olderThanHours, excludeIds.length ? { excludeIds } : undefined);
+      const purged = await tx.purgeDeletedPages(olderThanHours, excludeIds.length ? { excludeIds } : undefined);
+      const bySource = new Map<string, string[]>();
+      for (const page of purged.pages ?? []) bySource.set(page.source_id, [...bySource.get(page.source_id) ?? [], page.slug]);
+      for (const [sourceId, slugs] of bySource) await redactExpiredPageJournal(tx, sourceId, slugs);
+      return purged;
     });
     const owner = await purgeOwedPages(engine, config, olderThanHours, owed, opts.only);
     reparked.push(...owner.reparked);

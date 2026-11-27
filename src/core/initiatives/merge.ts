@@ -181,7 +181,7 @@ export function validatePlan(raw: RawPlan | null, targets: TargetContext[], meta
 
 export async function planMerge(engine: BrainEngine, cfg: InitiativesConfig, initiativeSlug: string, deps: { chat?: ChatFn } = {}): Promise<MergePlan> {
   const page = await readPage(engine, cfg.sourceId, initiativeSlug);
-  if (!page || page.type !== INITIATIVE_TYPE) throw new OperationError('initiative_not_found', `No initiative ${initiativeSlug} in source ${cfg.sourceId}.`);
+  if (!page || page.type !== INITIATIVE_TYPE) throw new OperationError('initiative_not_found', `No initiative ${initiativeSlug} in source ${cfg.sourceId}.`, 'List initiatives with initiatives_list and pass one of their slugs.');
   const facts = await liveFacts(engine, cfg.sourceId, page.slug);
   const targets = await targetContexts(engine, cfg, page.slug, stringList(page.frontmatter.targets));
   const requirements = stripPlanSection(page.body);
@@ -229,7 +229,7 @@ export async function writeMergePlan(ctx: OperationContext, cfg: InitiativesConf
     body: `${stripPlanSection(page.body)}\n\n${planSection(plan)}\n`,
     frontmatter: { ...page.frontmatter, merge_status: 'proposed' },
   }));
-  if (!updated) throw new OperationError('initiative_not_found', `No initiative ${initiativeSlug} in source ${cfg.sourceId}.`);
+  if (!updated) throw new OperationError('initiative_not_found', `No initiative ${initiativeSlug} in source ${cfg.sourceId}.`, 'List initiatives with initiatives_list and pass one of their slugs.');
 }
 
 export function readMergePlan(body: string): MergePlan | null {
@@ -259,13 +259,13 @@ export async function applyMerge(ctx: OperationContext, cfg: InitiativesConfig, 
   opts: { skip?: string[]; dryRun?: boolean } = {}): Promise<MergeApplyResult> {
   const engine = ctx.engine;
   const page = await readPage(engine, cfg.sourceId, initiativeSlug);
-  if (!page || page.type !== INITIATIVE_TYPE) throw new OperationError('initiative_not_found', `No initiative ${initiativeSlug} in source ${cfg.sourceId}.`);
+  if (!page || page.type !== INITIATIVE_TYPE) throw new OperationError('initiative_not_found', `No initiative ${initiativeSlug} in source ${cfg.sourceId}.`, 'List initiatives with initiatives_list and pass one of their slugs.');
   if (initiativeStatusOf(page.frontmatter) !== 'done') {
     throw new OperationError('initiative_not_done', `Initiative ${page.slug} is ${initiativeStatusOf(page.frontmatter)}; only a done initiative merges.`,
       'Finish it with outcome done first.');
   }
   const plan = readMergePlan(page.body);
-  if (!plan) throw new OperationError('merge_plan_missing', `Initiative ${page.slug} has no merge plan.`, 'Plan the merge first.');
+  if (!plan) throw new OperationError('merge_plan_missing', `Initiative ${page.slug} has no merge plan.`, 'Finish the initiative as done (finish_initiative) so its job writes the merge plan, then apply it.');
   const skip = new Set(opts.skip ?? []);
   const todo = plan.items.filter(i => i.action !== 'skip' && !skip.has(i.id));
   const result: MergeApplyResult = { applied: 0, skipped: plan.items.length - todo.length, created_pages: [], touched: [], errors: [], dry_run: !!opts.dryRun };

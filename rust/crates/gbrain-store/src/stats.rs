@@ -1,7 +1,9 @@
 //! Brain statistics, health and the ingest log: the reads behind `getStats`, `getHealth`,
 //! `listEnrichCandidates` and `findAnomalies`, and the `ingest_log` table of the PGLite engine.
 //!
-//! Members: getStats, getHealth, logIngest, getIngestLog, listEnrichCandidates, findAnomalies.
+//! Members: getStats, getHealth, countOnboardSignal, countBrainLivePages, countLivePagesBySource,
+//! countChunksBySource, readBrainMaturity, logIngest, getIngestLog, listEnrichCandidates,
+//! findAnomalies.
 //!
 //! Keys: an ingest log row lives at `n <created_at> <id>`, both 8 bytes big-endian. `created_at`
 //! is the row's microsecond timestamp with the sign bit flipped (so the byte order is the
@@ -23,7 +25,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::chunks::read_chunks;
 use crate::env::iso;
-use crate::error::{CONSTRAINT_VIOLATION, INVALID_ARGUMENT, Result, StoreError};
+use crate::error::{CONSTRAINT_VIOLATION, INVALID_ARGUMENT, Result, STORE_CORRUPT, StoreError};
+use crate::facts::{OwnerOnlyCache, PrivacyPolicy};
 use crate::kv::{KvRead, scan_prefix};
 use crate::links::{in_links, no_nul, out_links};
 use crate::pages::{PageRecord, all_pages, next_id};
@@ -41,14 +44,60 @@ const DAY_US: i64 = 86_400_000_000;
 
 /// What is stored for an ingest log row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct IngestRecord {
-    id: u64,
-    source_id: String,
-    source_type: String,
-    source_ref: String,
-    pages_updated: Value,
-    summary: String,
-    created_at_us: i64,
+pub(crate) struct IngestRecord {
+    pub(crate) id: u64,
+    pub(crate) source_id: String,
+    pub(crate) source_type: String,
+    pub(crate) source_ref: String,
+    #[serde(deserialize_with = "crate::jsonb::de_value")]
+    pub(crate) pages_updated: Value,
+    pub(crate) summary: String,
+    pub(crate) created_at_us: i64,
+    /// `writer_version`, `writer_host_id`, `writer_segment_reader` (migration v254): the logging
+    /// binary's stamp. A record written before the stamp reads them as NULL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writer_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writer_host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writer_segment_reader: Option<bool>,
+}
+
+/// One ingest log row as the segmented-storage gate reads it (`writer-versions.rs`).
+pub(crate) struct IngestWriter {
+    pub source_type: String,
+    pub writer_host_id: Option<String>,
+    pub writer_version: Option<String>,
+    /// `writer_segment_reader IS TRUE`.
+    pub segment_reader: bool,
+    pub created_at_us: i64,
+}
+
+/// The writer stamp of every ingest log row created at or after `since_us`.
+pub(crate) fn ingest_writers_since(read: &dyn KvRead, since_us: i64) -> Result<Vec<IngestWriter>> {
+    let mut out = Vec::new();
+    let mut bad = None;
+    scan_prefix(read, &[keys::INGEST_LOG], false, &mut |_, v| {
+        match serde_json::from_slice::<IngestRecord>(v) {
+            Ok(r) if r.created_at_us >= since_us => out.push(IngestWriter {
+                source_type: r.source_type,
+                writer_host_id: r.writer_host_id,
+                writer_version: r.writer_version,
+                segment_reader: r.writer_segment_reader == Some(true),
+                created_at_us: r.created_at_us,
+            }),
+            Ok(_) => {}
+            Err(e) => bad = Some(e),
+        }
+        bad.is_none()
+    })?;
+    match bad {
+        Some(e) => Err(StoreError::new(
+            STORE_CORRUPT,
+            format!("an ingest log record: {e}"),
+        )),
+        None => Ok(out),
+    }
 }
 
 impl IngestRecord {
@@ -58,7 +107,7 @@ impl IngestRecord {
             "source_id": self.source_id,
             "source_type": self.source_type,
             "source_ref": self.source_ref,
-            "pages_updated": self.pages_updated,
+            "pages_updated": crate::jsonb::ordered(&self.pages_updated),
             "summary": self.summary,
             "created_at": iso(self.created_at_us),
         })
@@ -82,6 +131,11 @@ pub struct IngestInput {
     pub source_ref: Option<String>,
     pub pages_updated_json: Option<String>,
     pub summary: Option<String>,
+    /// The logging binary's stamp (`writerStamp({ mint: false })`); `writer_host_id` is a uuid
+    /// (`$7::uuid`) or null.
+    pub writer_version: Option<String>,
+    pub writer_host_id: Option<String>,
+    pub writer_segment_reader: Option<bool>,
 }
 
 /// Options of `getIngestLog`; the member resolves `limit` (`opts.limit || 50`).
@@ -124,6 +178,16 @@ pub struct HealthInput {
     pub entity_types: EntityTypeFilter,
 }
 
+/// Input of `countOnboardSignal`: one of the six onboarding counts and the resolved entity type
+/// filter. A signal the member does not name counts live pages, as the last arm of
+/// `engine-sql/health.ts` does.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OnboardSignalInput {
+    pub signal: String,
+    pub entity_types: EntityTypeFilter,
+}
+
 /// Input of `listEnrichCandidates`, already clamped by the member.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -148,6 +212,9 @@ pub struct AnomalyInput {
     pub baseline_start_us: f64,
     pub since_us: f64,
     pub since_end_us: f64,
+    /// `excludePrivate`: the page policy (`facts/privacy.rs` `page_hidden`), applied to the
+    /// baseline keys, the baseline counts and today's counts alike; null reads every page.
+    pub exclude_private: Option<PrivacyPolicy>,
 }
 
 fn in_scope(scope: &Option<HashSet<String>>, page: &PageRecord) -> bool {
@@ -188,20 +255,10 @@ fn json_has_nul(value: &Value) -> bool {
     }
 }
 
-/// `jsonb` keeps one value per key (the last) and orders keys by length, then bytes.
-fn jsonb_normalize(value: Value) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(items.into_iter().map(jsonb_normalize).collect()),
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map
-                .into_iter()
-                .map(|(k, v)| (k, jsonb_normalize(v)))
-                .collect();
-            entries.sort_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-            Value::Object(entries.into_iter().collect::<Map<String, Value>>())
-        }
-        other => other,
-    }
+/// `jsonb` keeps one value per key (the last) and orders keys by length, then bytes
+/// ([`crate::jsonb::order`]).
+pub(crate) fn jsonb_normalize(value: Value) -> Value {
+    crate::jsonb::order(value)
 }
 
 fn not_null(column: &str) -> StoreError {
@@ -271,6 +328,13 @@ impl Store {
                 },
             )?
             .len())
+    }
+
+    /// `pingStore`: the liveness round trip. Opens a read snapshot and drops it; an error means
+    /// the store cannot serve a read.
+    pub fn ping_store(&self) -> Result<()> {
+        let _read = self.read()?;
+        Ok(())
     }
 
     /// `getStats`: page, chunk, embedding, link, tag and timeline counts, and live pages per
@@ -411,6 +475,98 @@ impl Store {
         }))
     }
 
+    /// `countOnboardSignal` (`engine-sql/health.ts`): one brain-wide count, with no source scope
+    /// and no quarantine filter. `stale_chunks`: chunks with no stored vector on live pages
+    /// without `embed_skip`. `entities`: live pages of an entity type; `linked_entities` and
+    /// `timeline_entities`: those with any inbound link, or any timeline entry. `takes`: every take.
+    /// Anything else: live pages.
+    pub fn count_onboard_signal(&self, input: &OnboardSignalInput) -> Result<u64> {
+        let read = self.read()?;
+        if input.signal == "takes" {
+            return Ok(crate::takes::all_takes(&*read)?.len() as u64);
+        }
+        let per_source: HashMap<&str, &Vec<String>> = input
+            .entity_types
+            .per_source
+            .iter()
+            .map(|b| (b.source_id.as_str(), &b.types))
+            .collect();
+        let is_entity = |page: &PageRecord| {
+            per_source
+                .get(page.source_id.as_str())
+                .copied()
+                .unwrap_or(&input.entity_types.types)
+                .contains(&page.page_type)
+        };
+        let mut count = 0u64;
+        for page in all_pages(&*read)?.iter().filter(|p| live(p)) {
+            count += match input.signal.as_str() {
+                "stale_chunks" if page.frontmatter.contains_key("embed_skip") => 0,
+                "stale_chunks" => read_chunks(&*read, page.id)?
+                    .iter()
+                    .filter(|c| !c.embed.has_vector())
+                    .count() as u64,
+                "entities" => u64::from(is_entity(page)),
+                "linked_entities" => {
+                    u64::from(is_entity(page) && !in_links(&*read, page.id)?.is_empty())
+                }
+                "timeline_entities" => {
+                    u64::from(is_entity(page) && self.timeline_count(page, 1)? > 0)
+                }
+                _ => 1,
+            };
+        }
+        Ok(count)
+    }
+
+    /// `countBrainLivePages` (`engine-sql/health.ts`): live pages in every source.
+    pub fn count_brain_live_pages(&self) -> Result<u64> {
+        let read = self.read()?;
+        Ok(all_pages(&*read)?.iter().filter(|p| live(p)).count() as u64)
+    }
+
+    /// `countLivePagesBySource` and `countChunksBySource` (`engine-sql/health.ts`): one row per
+    /// source that has a live page, in source id byte order, with its live pages, the chunks of
+    /// those pages and how many of the chunks have a stored vector. `gbrain sources status` reads
+    /// it. Soft-deleted pages and their chunks do not count.
+    pub fn live_counts_by_source(&self) -> Result<Value> {
+        let read = self.read()?;
+        let mut counts: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+        for page in all_pages(&*read)?.iter().filter(|p| live(p)) {
+            let chunks = read_chunks(&*read, page.id)?;
+            let row = counts.entry(page.source_id.clone()).or_default();
+            row.0 += 1;
+            row.1 += chunks.len() as u64;
+            row.2 += chunks.iter().filter(|c| c.embed.has_vector()).count() as u64;
+        }
+        Ok(Value::Array(
+            counts
+                .into_iter()
+                .map(|(source_id, (pages, chunks, embedded))| {
+                    json!({ "source_id": source_id, "pages": pages, "chunks": chunks, "embedded": embedded })
+                })
+                .collect(),
+        ))
+    }
+
+    /// `readBrainMaturity` (`engine-sql/health.ts`): live pages and unexpired facts in every
+    /// source, and `since`, the earliest `created_at` of any source or page (soft-deleted pages
+    /// count, as `MIN(created_at) FROM pages` does), or null when there is neither.
+    pub fn read_brain_maturity(&self) -> Result<Value> {
+        let read = self.read()?;
+        let pages = all_pages(&*read)?;
+        let since = all_sources(&*read)?
+            .iter()
+            .map(|s| s.created_at_us)
+            .chain(pages.iter().map(|p| p.created_at_us))
+            .min();
+        Ok(json!({
+            "pages": pages.iter().filter(|p| live(p)).count() as u64,
+            "facts": crate::facts::count_unexpired(&*read)?,
+            "since": since.map(iso),
+        }))
+    }
+
     /// `logIngest`: appends one row. A NULL column fails as Postgres's NOT NULL check does, in
     /// column order.
     pub fn log_ingest(&self, input: &IngestInput) -> Result<()> {
@@ -431,6 +587,16 @@ impl Store {
             .as_deref()
             .ok_or_else(|| not_null("pages_updated"))?;
         let summary = input.summary.clone().ok_or_else(|| not_null("summary"))?;
+        let writer_host_id = match &input.writer_host_id {
+            None => None,
+            Some(h) if crate::env::is_uuid(h) => Some(h.to_lowercase()),
+            Some(h) => {
+                return Err(StoreError::new(
+                    INVALID_ARGUMENT,
+                    format!("invalid input syntax for type uuid: \"{h}\""),
+                ));
+            }
+        };
         no_nul(
             "logIngest",
             &[
@@ -440,6 +606,9 @@ impl Store {
                 ("summary", &summary),
             ],
         )?;
+        if let Some(version) = &input.writer_version {
+            no_nul("logIngest", &[("writer_version", version)])?;
+        }
         let pages_updated: Value = serde_json::from_str(pages_json).map_err(|e| {
             StoreError::new(INVALID_ARGUMENT, format!("logIngest: pages_updated: {e}"))
         })?;
@@ -449,18 +618,22 @@ impl Store {
                 "logIngest: pages_updated must not contain a NUL character",
             ));
         }
-        let pages_updated = jsonb_normalize(pages_updated);
+        // jsonb keeps one value per key (the last; a parsed Map already did) in jsonb key order.
+        let pages_updated = crate::jsonb::order(pages_updated);
         let created_at_us = self.env.now_micros();
         self.write(|tx| {
             let id = next_id(tx, NEXT_INGEST_LOG_ID)?;
             let record = IngestRecord {
                 id,
-                source_id,
-                source_type,
-                source_ref,
-                pages_updated,
-                summary,
+                source_id: source_id.clone(),
+                source_type: source_type.clone(),
+                source_ref: source_ref.clone(),
+                pages_updated: pages_updated.clone(),
+                summary: summary.clone(),
                 created_at_us,
+                writer_version: input.writer_version.clone(),
+                writer_host_id: writer_host_id.clone(),
+                writer_segment_reader: input.writer_segment_reader,
             };
             put_json(tx, &ingest_key(created_at_us, id), &record)
         })
@@ -603,6 +776,7 @@ impl Store {
         let mut baseline: [BTreeMap<String, Days>; 2] = [BTreeMap::new(), BTreeMap::new()];
         type Today = BTreeMap<String, (BTreeSet<u64>, BTreeSet<String>)>;
         let mut today: [Today; 2] = [BTreeMap::new(), BTreeMap::new()];
+        let mut owner_only = OwnerOnlyCache::default();
         for page in all_pages(&*read)? {
             if !live(&page)
                 || quarantined(&page)
@@ -612,6 +786,14 @@ impl Store {
                 continue;
             }
             let at = page.updated_at_us;
+            if !(baseline_start..since_end).contains(&at) {
+                continue;
+            }
+            if let Some(policy) = &input.exclude_private
+                && owner_only.page_hidden(&*read, &page, policy)?
+            {
+                continue;
+            }
             let cohorts = [page.tags.clone(), vec![page.page_type.clone()]];
             if at >= baseline_start && at < since {
                 let day = at.div_euclid(DAY_US);
@@ -661,6 +843,30 @@ impl Store {
         }
         Ok(json!({ "baseline": baseline_rows, "today": today_rows }))
     }
+}
+
+/// The `ingest_log` rows a fact purge's inventory probe searches (crate::facts::purge_probe).
+pub(crate) fn purge_probe_rows(
+    read: &dyn KvRead,
+) -> Result<Vec<crate::facts::purge_probe::ProbeRow>> {
+    use crate::facts::purge_probe::{ProbeCell, ProbeRow, json_rows};
+    Ok(json_rows::<IngestRecord>(read, &[keys::INGEST_LOG])?
+        .into_iter()
+        .map(|r| ProbeRow {
+            cells: vec![
+                ("summary", ProbeCell::text(&r.summary)),
+                (
+                    "pages_updated",
+                    if r.pages_updated.is_null() {
+                        ProbeCell::Null
+                    } else {
+                        ProbeCell::jsonb(&r.pages_updated)
+                    },
+                ),
+            ],
+            source_id: Some(r.source_id),
+        })
+        .collect())
 }
 
 #[cfg(test)]

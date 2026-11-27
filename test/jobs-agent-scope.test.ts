@@ -8,7 +8,7 @@
  * `data->>'__owner_client_id'` — the predicate submit_agent stamps).
  * Foreign-owned and missing ids share one uniform error (anti-enumeration).
  * The local CLI and an admin credential bound to the brain owner stay unfenced;
- * any other remote admin credential is fenced to the jobs it submitted.
+ * GST-4010: any other remote admin credential is fenced to its own jobs.
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -52,7 +52,7 @@ const agentCtx = (clientId = 'agent-a') =>
 const adminCtx = () =>
   ctx({ auth: { clientId: 'admin-tok', scopes: ['admin'] } as OperationContext['auth'] });
 const localCtx = () => ctx({ remote: false });
-/** An admin call from a credential bound to the brain owner (dispatch sets owner on the caller-access record). */
+/** An admin call from a credential bound to the brain owner (dispatch sets CallerAccess.owner for it). */
 const asOwner = <T>(fn: () => Promise<T>) => withCallerAccess({ owner: true }, fn);
 
 let seedSeq = 0;
@@ -108,13 +108,13 @@ describe('get_job / get_job_progress — ownership fence', () => {
     await expect(get_job.handler(noIdentity, { id })).rejects.toThrow(/client identity/);
   });
 
-  test('local CLI and an owner-bound admin stay unfenced', async () => {
+  test('local CLI and an owner-bound admin token stay unfenced', async () => {
     const theirs = await seedJob('agent-b');
-    expect(((await get_job.handler(localCtx(), { id: theirs })) as { id: number }).id).toBe(theirs);
     expect(((await asOwner(() => get_job.handler(adminCtx(), { id: theirs }))) as { id: number }).id).toBe(theirs);
+    expect(((await get_job.handler(localCtx(), { id: theirs })) as { id: number }).id).toBe(theirs);
   });
 
-  test('a remote admin token that is not the owner is fenced to its own jobs', async () => {
+  test('GST-4010: an admin token not bound to the owner reads only its own jobs', async () => {
     const theirs = await seedJob('agent-b');
     const mine = await seedJob('admin-tok');
     await expect(get_job.handler(adminCtx(), { id: theirs })).rejects.toThrow(/not found/i);
@@ -123,7 +123,7 @@ describe('get_job / get_job_progress — ownership fence', () => {
 });
 
 describe('list_jobs — ownership fence', () => {
-  test('agent lists only its own jobs; a non-owner admin only its own; local and owner see all', async () => {
+  test('agent lists only its own jobs; a non-owner admin only its own; the owner and local CLI see all', async () => {
     await seedJob('agent-a');
     await seedJob('agent-a');
     await seedJob('agent-b');
@@ -133,8 +133,7 @@ describe('list_jobs — ownership fence', () => {
     expect(mine.length).toBe(2);
     for (const j of mine) expect(j.data.__owner_client_id).toBe('agent-a');
 
-    const admin = (await list_jobs.handler(adminCtx(), {})) as unknown[];
-    expect(admin.length).toBe(0);
+    expect((await list_jobs.handler(adminCtx(), {})) as unknown[]).toEqual([]);
     const all = (await asOwner(() => list_jobs.handler(adminCtx(), {}))) as unknown[];
     expect(all.length).toBe(4);
     const local = (await list_jobs.handler(localCtx(), {})) as unknown[];

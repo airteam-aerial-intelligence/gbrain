@@ -19,7 +19,10 @@
  * message (`<latest>`, so a migration renumber does not churn the goldens;
  * `expectSchemaLatestMatchesRegistry` keeps the hidden number honest). Check order is emitted order (deterministic; no Map/Set
  * iteration is re-sorted). stderr lines are kept (normalized) because the
- * early-stop paths announce themselves there.
+ * early-stop paths announce themselves there, except the read heartbeat's
+ * `still reading ... (N s so far)` lines (src/core/read-heartbeat.ts): one
+ * prints for every 10 s a run takes, so a slow runner adds lines a fast one
+ * never prints.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -172,7 +175,8 @@ export function normalizeDoctorText(text: string, roots: Record<string, string>,
   let out = scrubPaths(text, roots);
   for (const [pattern, label] of extra) out = typeof pattern === 'string' ? out.split(pattern).join(label) : out.replace(pattern, label);
   out = scrubTimestamps(out).replace(UUID, '<uuid>');
-  out = out.replace(/\(most recent caller: at [^()]*\([^()]*\)\)/g, '(most recent caller: <frame>)');
+  // #10431: queue_health caps the frame at 200 characters, which can cut off its own closing parenthesis.
+  out = out.replace(/\(most recent caller: at [^()\r\n]*\([^()\r\n]*\)(?:\)|(?=\.))/g, '(most recent caller: <frame>)');
   out = out.split(PACKAGE_VERSION).join('<version>');
   out = out.replace(SCHEMA_LATEST, (match, prefix: string, n: string) => (Number(n) === REGISTRY_LATEST ? `${prefix}<latest>` : match));
   out = out.split(`Bun ${Bun.version}`).join('Bun <bun-version>');
@@ -226,6 +230,8 @@ function maskSessionLaneCensus(report: unknown): unknown {
     ? { ...check, status: '<live-census>', message: '<live-census>', details: '<live-census>' } : check) };
 }
 
+const READ_HEARTBEAT_LINE = /^\[gbrain\] still reading .+ \(\d+ s so far\); no result yet\.$/;
+
 export function doctorJsonNormalizer(extra: Array<[RegExp | string, string]> = [], name = 'doctor-json-v1') {
   return defineNormalizer<GbrainRun>(name, (run) => {
     const fn = (s: string) => normalizeDoctorText(s, run.roots, extra);
@@ -234,7 +240,7 @@ export function doctorJsonNormalizer(extra: Array<[RegExp | string, string]> = [
       exit_code: run.exitCode,
       report: run.json === null ? null : mapStrings(maskSessionLaneCensus(maskWriterFloor(scrubKeys(run.json, VOLATILE_KEYS))), fn),
       stdout: run.json === null ? fn(run.stdout).split('\n').filter(Boolean) : '<json>',
-      stderr: fn(run.stderr).split('\n').filter(Boolean),
+      stderr: fn(run.stderr).split('\n').filter(line => line && !READ_HEARTBEAT_LINE.test(line)),
     };
   });
 }

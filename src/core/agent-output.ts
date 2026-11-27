@@ -343,7 +343,8 @@ export function noticeBlock(n: RenderedNotice): string {
 
 const HTTP_DROP_KEYS = new Set(['pid', 'lock_owner', 'path', 'data_dir', 'database_path', 'asset']);
 const ABS_PATH_RE = /(?:^|(?<=[\s'"`(=]))(?:\/(?:home|Users|root|tmp|var|private|opt|srv|mnt|etc)\/[^\s'"`)]*|[A-Za-z]:\\[^\s'"`)]*|~\/[^\s'"`)]*)/g;
-const PID_RE = /\b(PID|pid)\s*[:=]?\s*\d+/g;
+// No letter or digit before it, so `owner_pid=123` in a detail is redacted too (`\b` does not break after `_`).
+const PID_RE = /(?<![A-Za-z0-9])(PID|pid)\s*[:=]?\s*\d+/g;
 const KEY_NAME_RE = /\b[A-Z][A-Z0-9]*_(?:API_KEY|TOKEN|SECRET)\b/g;
 
 function redactString(s: string): string {
@@ -783,6 +784,15 @@ function dbParts(e: unknown, ctx: AgentErrorContext): EnvelopeParts | undefined 
         verify: { argv: ['gbrain', 'doctor', '--json'] },
       },
       ...(verb ? { detail: 'schema_missing', protocol_version: 1 as const } : {}),
+    };
+  }
+  if (d.reason === 'storage_interrupted') {
+    // #10408: a fault on the database host's storage; db-repair only probes the connection, which still answers.
+    return {
+      error: verb ? 'unavailable' : 'database_error', code: verb ? 'unavailable' : 'database_error', reason: d.reason,
+      message: d.message, suggestion: `${formatDbAccessMarker(d)}. ${d.remediation}`,
+      fix: { consent: [], actor: 'host_admin', why: d.remediation, requires_exclusive: false },
+      ...(verb ? { detail: d.reason, protocol_version: 1 as const } : {}),
     };
   }
   return {

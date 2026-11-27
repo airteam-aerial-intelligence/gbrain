@@ -10,6 +10,7 @@ import type { OperationContext } from '../ops/contract.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import type { PageType } from '../types.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { IDEA_TYPE, INITIATIVE_TYPE, SLACK_CHANNEL_ID, initiativeStatusOf, stringList, type InitiativesConfig } from './model.ts';
 
 export interface StoredPage {
@@ -42,6 +43,8 @@ export async function readPage(engine: BrainEngine, sourceId: string, slug: stri
   const snap = await engine.readPageSnapshot(slug, { sourceId });
   if (!snap) return null;
   const p = snap.page;
+  // Lifecycle pages are rewritten whole (frontmatter + body); a segmented page is refused, not truncated.
+  assertInlineBody(p, 'initiatives.readPage');
   return {
     sourceId, slug: p.slug, type: p.type ?? null, title: p.title ?? '', frontmatter: { ...(p.frontmatter ?? {}) },
     body: p.compiled_truth ?? '', timeline: p.timeline ?? '', tags: snap.tags ?? [], revision: snap.revision,

@@ -67,7 +67,7 @@ function scenarios(name: 'PGLite' | 'Postgres'): void {
       ...(captured ? { emitNotice: (n: Notice) => { captured.notices.push(n); }, emitResponseMeta: (k: string, v: unknown) => { captured.meta[k] = v; } } : {}),
       ...over,
     } as OperationContext);
-    // The remote admin is bound to the brain owner (whole-queue view); a non-owner remote caller sees only its own jobs.
+    // GST-4010: the remote admin is bound to the brain owner (the whole-queue view); any other remote caller sees only its own jobs.
     const list = async (c: OperationContext, params: Record<string, unknown>) =>
       await withCallerAccess({ owner: c.auth?.clientId === 'admin-tok' }, () => operationsByName.list_jobs.handler(c, params)) as Row[];
 

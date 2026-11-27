@@ -10,6 +10,7 @@ use common::{TempDir, open};
 use gbrain_store::Store;
 use gbrain_store::chunks::{ChunkInput, UpsertChunksOptions};
 use gbrain_store::error::*;
+use gbrain_store::facts::PrivacyPolicy;
 use gbrain_store::links::AddLinkOptions;
 use gbrain_store::pages::{PageInput, PutPageOptions};
 use gbrain_store::salience::EmotionalWeightRow;
@@ -48,6 +49,7 @@ fn ingest(source_ref: &str, source: Option<&str>) -> IngestInput {
         source_ref: Some(source_ref.into()),
         pages_updated_json: Some(r#"{"b":1,"a":[2]}"#.into()),
         summary: Some("ok".into()),
+        ..IngestInput::default()
     }
 }
 
@@ -125,6 +127,15 @@ fn log_ingest_checks_not_null_columns_in_order() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn ping_store_answers_on_an_empty_and_a_written_store() {
+    let dir = TempDir::new("stats-ping");
+    let store = open(&dir);
+    store.ping_store().unwrap();
+    put_page(&store, "a", "note", "alpha", None);
+    store.ping_store().unwrap();
 }
 
 #[test]
@@ -239,6 +250,7 @@ fn anomalies_bucket_baseline_days_and_today() {
         baseline_start_us: (since - 3 * day) as f64,
         since_us: since as f64,
         since_end_us: (since + day) as f64,
+        ..Default::default()
     };
     let found = store.find_anomalies(&input).unwrap();
     assert_eq!(found["baseline"], json!({"tag": {}, "type": {}}));
@@ -260,10 +272,93 @@ fn anomalies_bucket_baseline_days_and_today() {
         baseline_start_us: since as f64,
         since_us: (since + day) as f64,
         since_end_us: (since + 2 * day) as f64,
+        ..Default::default()
     };
     let found = store.find_anomalies(&earlier).unwrap();
     assert!(found["today"].as_array().unwrap().is_empty());
     let tag = found["baseline"]["tag"]["t"].as_object().unwrap();
+    assert_eq!(tag.values().next().unwrap(), 1);
+}
+
+#[test]
+fn anomalies_under_exclude_private_skip_hidden_pages_in_today_and_the_baseline() {
+    let dir = TempDir::new("stats-anomaly-private");
+    let store = open(&dir);
+    let put = |slug: &str, frontmatter: Value| {
+        let input: PageInput = serde_json::from_value(json!({
+            "type": "note", "title": slug, "compiled_truth": "x", "frontmatter": frontmatter,
+        }))
+        .unwrap();
+        store
+            .put_page(slug, &input, &PutPageOptions::default())
+            .unwrap();
+        store.add_tag(slug, "t", None).unwrap();
+    };
+    put("open", json!({}));
+    put("secret", json!({"visibility": "private"}));
+    put("readers", json!({"readable_by": ["alice-example"]}));
+    put("alias", json!({"access": "restricted"}));
+    let day: i64 = 86_400_000_000;
+    let since = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64)
+        .div_euclid(day)
+        * day;
+    let read = |since: i64, policy: Option<PrivacyPolicy>| {
+        store
+            .find_anomalies(&AnomalyInput {
+                scope: None,
+                baseline_start_us: (since - day) as f64,
+                since_us: since as f64,
+                since_end_us: (since + day) as f64,
+                exclude_private: policy,
+            })
+            .unwrap()
+    };
+    let slugs = |found: &Value| {
+        let mut slugs: Vec<String> = found["today"][0]["page_slugs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        slugs.sort();
+        slugs
+    };
+    let strict = PrivacyPolicy {
+        honor_aliases: true,
+        entity_privacy: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        slugs(&read(since, None)),
+        ["alias", "open", "readers", "secret"]
+    );
+    assert_eq!(slugs(&read(since, Some(strict.clone()))), ["open"]);
+    // With aliases off, `access: restricted` is no longer private.
+    let no_alias = PrivacyPolicy {
+        honor_aliases: false,
+        entity_privacy: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        slugs(&read(since, Some(no_alias.clone()))),
+        ["alias", "open"]
+    );
+    // With the privacy part off (privacy relaxed), only the reader list still hides a page.
+    let relaxed = PrivacyPolicy {
+        honor_aliases: true,
+        entity_privacy: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        slugs(&read(since, Some(relaxed.clone()))),
+        ["alias", "open", "secret"]
+    );
+    // The baseline window counts only what the policy keeps.
+    let later = read(since + day, Some(strict.clone()));
+    let tag = later["baseline"]["tag"]["t"].as_object().unwrap();
     assert_eq!(tag.values().next().unwrap(), 1);
 }
 
@@ -362,4 +457,97 @@ fn enrich_salience_order_reads_the_emotional_weight() {
     .unwrap();
     store.set_emotional_weight_batch(&rows).unwrap();
     assert_eq!(slugs(&store), ["high", "low", "linked"]);
+}
+
+fn onboard(store: &Store, signal: &str) -> u64 {
+    let input: OnboardSignalInput = serde_json::from_value(json!({
+        "signal": signal,
+        "entityTypes": {
+            "types": ["person", "company"],
+            "per_source": [{ "source_id": "other", "types": ["company"] }],
+        },
+    }))
+    .unwrap();
+    store.count_onboard_signal(&input).unwrap()
+}
+
+#[test]
+fn onboard_signals_count_brain_wide_live_pages_under_the_entity_filter() {
+    let dir = TempDir::new("stats-onboard");
+    let store = open(&dir);
+    source(&store, "other");
+    put_page(&store, "people/alice-example", "person", "alice", None);
+    put_page(&store, "companies/acme-example", "company", "acme", None);
+    put_page(&store, "people/gone-example", "person", "gone", None);
+    put_page(&store, "notes/memo", "note", "memo", None);
+    // A person in `other`, whose entity types are only `company`.
+    put_page(
+        &store,
+        "people/carol-example",
+        "person",
+        "carol",
+        Some("other"),
+    );
+    let skip: PageInput = serde_json::from_value(json!({
+        "type": "note", "title": "skip", "compiled_truth": "skip", "frontmatter": { "embed_skip": true },
+    }))
+    .unwrap();
+    store
+        .put_page("notes/skip", &skip, &PutPageOptions::default())
+        .unwrap();
+    chunks(&store, "notes/memo", 3, 1);
+    chunks(&store, "notes/skip", 2, 0);
+    chunks(&store, "people/gone-example", 1, 0);
+    link(&store, "notes/memo", "people/alice-example");
+    link(&store, "people/alice-example", "people/gone-example");
+    store.soft_delete_page("people/gone-example", None).unwrap();
+
+    // memo has 2 chunks with no vector; alice, acme and carol each have the one chunk `put_page`
+    // made from the body. skip (embed_skip) and gone (soft-deleted) do not count.
+    assert_eq!(onboard(&store, "stale_chunks"), 5);
+    assert_eq!(onboard(&store, "entities"), 2);
+    assert_eq!(onboard(&store, "linked_entities"), 1);
+    assert_eq!(onboard(&store, "timeline_entities"), 0);
+    assert_eq!(onboard(&store, "takes"), 0);
+    assert_eq!(onboard(&store, "pages"), 5);
+    // A signal the member does not name counts live pages, as the SQL's last arm does.
+    assert_eq!(onboard(&store, "unknown"), 5);
+}
+
+#[test]
+fn live_pages_count_every_source_and_skip_soft_deleted_pages() {
+    // `countLivePages` (`engine-sql/doctor-pages.ts`), the brain-wide count backup coverage reads.
+    let dir = TempDir::new("stats-brain-live");
+    let store = open(&dir);
+    assert_eq!(store.count_live_pages().unwrap(), 0);
+    source(&store, "other");
+    put_page(&store, "notes/a", "note", "a", None);
+    put_page(&store, "notes/b", "note", "b", None);
+    put_page(&store, "notes/c", "note", "c", Some("other"));
+    assert_eq!(store.count_live_pages().unwrap(), 3);
+    store.soft_delete_page("notes/b", None).unwrap();
+    assert_eq!(store.count_live_pages().unwrap(), 2);
+}
+
+#[test]
+fn live_counts_by_source_count_live_pages_and_their_chunks_per_source() {
+    let dir = TempDir::new("stats-live-by-source");
+    let store = open(&dir);
+    assert_eq!(store.live_counts_by_source().unwrap(), json!([]));
+    source(&store, "other");
+    put_page(&store, "notes/a", "note", "a", None);
+    put_page(&store, "notes/b", "note", "b", None);
+    put_page(&store, "notes/gone", "note", "gone", None);
+    put_page(&store, "notes/c", "note", "c", Some("other"));
+    chunks(&store, "notes/a", 3, 2);
+    chunks(&store, "notes/gone", 2, 2);
+    // put_page writes one chunk of its own, so notes/b and notes/c have one each.
+    store.soft_delete_page("notes/gone", None).unwrap();
+    assert_eq!(
+        store.live_counts_by_source().unwrap(),
+        json!([
+            { "source_id": "default", "pages": 2, "chunks": 4, "embedded": 2 },
+            { "source_id": "other", "pages": 1, "chunks": 1, "embedded": 0 },
+        ])
+    );
 }

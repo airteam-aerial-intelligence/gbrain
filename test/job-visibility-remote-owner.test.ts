@@ -108,7 +108,7 @@ describe('remote job ownership', () => {
     const forBob = (await op('list_jobs').handler(bob, { finished_since: since })) as { jobs: Array<{ id: number }> };
     expect(forAlice.jobs.map(j => j.id)).toEqual([id]);
     expect(forBob.jobs).toEqual([]);
-    await expect(op('retry_job').handler(bob, { id })).rejects.toThrow(/submitting principal/);
+    await expect(op('retry_job').handler(bob, { id })).rejects.toThrow(/Job not found/) // upstream fence: a foreign job reads as missing;
   }));
 
   test('local operator jobs are hidden from remote callers; the local CLI and an owner-bound admin see everything', () => isolated(async () => {

@@ -861,20 +861,39 @@ export function jobAudienceKey(audience: readonly string[] | null | undefined): 
   return [...new Set(audience ?? [])].sort().join(',');
 }
 
-/**
- * SQL: the owner key a remote-submitted job was accepted under (`submission_authority.grant.owner`, written by
- * prepareRemoteJob / prepareRemoteAgent from the credential and the declared end user), falling back to the
- * `__owner_client_id` stamp submit_agent jobs carried before the key existed. NULL for local (application) jobs.
- */
-export function jobOwnerSql(alias?: string): string {
-  const a = alias ? `${alias}.` : '';
-  return `COALESCE(${a}submission_authority->'grant'->>'owner', ${a}data->>'__owner_client_id')`;
-}
-
 /** SQL: the job's accepted actor and audience equal the four parameters starting at `$first`. `alias` is a code-provided table alias. */
 export function jobActorSql(first: number, alias?: string): string {
   const grant = `${alias ? alias + '.' : ''}submission_authority->'grant'`;
   const actingFor = `${grant}->'actingFor'`;
   const audience = `COALESCE(CASE WHEN jsonb_typeof(${actingFor}) = 'array' THEN (SELECT string_agg(DISTINCT e COLLATE "C", ',' ORDER BY e COLLATE "C") FROM jsonb_array_elements_text(${actingFor}) e) WHEN ${actingFor} IS NOT NULL THEN '!' END, '') = $${first + 3}::text`;
   return [...['system', 'external_id', 'member'].map((key, i) => `COALESCE(${grant}->'actor'->>'${key}', '') = $${first + i}::text`), audience].join(' AND ');
+}
+
+/**
+ * GST-4010: the remote caller a fenced job read or control matches (ops/jobs.ts agentOwnerFence). `principal` is the
+ * verifier-derived credential every remote submission records as submission_authority.principal; `clientId` matches the
+ * `__owner_client_id` stamp of agent rows queued before submission authority existed; `actor` is jobActorSql's.
+ */
+export interface JobOwner {
+  principal: { kind: string; id: string } | null; clientId: string | null; actor: JobActor;
+  /** Airteam fork: the end user a trusted gateway declared (X-Gbrain-End-User); a job matches only the same one (none = none). */
+  endUser?: string | null;
+}
+
+/**
+ * SQL: the job belongs to the JobOwner in the eight parameters starting at `$first` (jobOwnerParams). A job with a
+ * recorded principal matches on that principal only, so caller-visible data can never claim a remote job; a job with
+ * none (local or pre-authority rows) matches only its `__owner_client_id` stamp. Either way its actor and audience must
+ * equal the caller's, and (Airteam fork) so must the end user a trusted gateway declared. `alias` is a code-provided table alias.
+ */
+export function jobOwnedSql(first: number, alias?: string): string {
+  const t = alias ? `${alias}.` : '';
+  const principal = `${t}submission_authority->'principal'`;
+  return `((${principal}->>'kind' = $${first}::text AND ${principal}->>'id' = $${first + 1}::text)
+      OR (${principal} IS NULL AND ${t}data->>'__owner_client_id' = $${first + 2}::text)) AND ${jobActorSql(first + 3, alias)}
+      AND COALESCE(${t}submission_authority->'grant'->>'endUser', '') = $${first + 7}::text`;
+}
+
+export function jobOwnerParams(owner: JobOwner): unknown[] {
+  return [owner.principal?.kind ?? null, owner.principal?.id ?? null, owner.clientId, ...owner.actor, owner.endUser ?? ''];
 }
