@@ -359,6 +359,8 @@
     "household_reclassify",
     "household_scale",
     "household_transition",
+    "idea_implemented",
+    "idea_not_found",
     "idempotency_conflict",
     "identity_link_owned_by_dedupe",
     "identity_member_in_other_group",
