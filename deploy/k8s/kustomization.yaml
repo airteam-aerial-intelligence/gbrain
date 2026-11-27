@@ -22,4 +22,4 @@ resources:
   - gbrain-slack-sync.yaml
 images:
   - name: ghcr.io/airteam-aerial-intelligence/gbrain
-    newTag: replaced-by-first-ci-run
+    newTag: v0.60.776.0-airteam-ci.1
