@@ -8,6 +8,10 @@
  * models price as null (never 0); a thrown call carries its error class only.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { _resetStdoutRedirectForTests } from '../src/core/console-prefix.ts';
+
+// R9: the stdio-serve test below installs the process-global stdout redirect; undo it for every later file.
+afterAll(() => _resetStdoutRedirectForTests());
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { makeSubagentHandler, type MessagesClient } from '../src/core/minions/handlers/subagent.ts';
