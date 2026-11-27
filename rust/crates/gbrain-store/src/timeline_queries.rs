@@ -1,9 +1,11 @@
 //! Timeline reads by date (the Life Chronicle reads) and event projections.
 //!
-//! Members: getTimelineForDate, getSince, getOnThisDay, getLastSeen, upsertEventProjection.
-//! The four reads are served. upsertEventProjection still refuses with `engine_capability_missing`
-//! in the TypeScript engine: it writes the core `E`/`D`/`G` timeline records, which only
-//! `timeline.rs` may write, and waits on the core helpers coming on `rust-engine-core-hooks`.
+//! Members: getTimelineForDate, getSince, getOnThisDay, getLastSeen, upsertEventProjection,
+//! removeTimelineRows, updateTimelineDetails, insertCanonicalTimelineRows. All eight are served.
+//! The Life Chronicle projection row members (listEventProjectionRows, readEventProjectionId,
+//! deleteEventProjections, restoreEventProjection) are `timeline_queries/event_rows.rs`. The
+//! writes touch timeline entries only through the core helpers `timeline::{next_entry_id,
+//! read_entry, put_entry, insert_entry, remove_entry, recompute_latest}`.
 //!
 //! What the reads mirror (src/core/engine-sql/timeline.ts): every timeline entry joined to its
 //! page `p` (which must not be soft-deleted) and, when the entry is an event projection, LEFT
@@ -13,9 +15,20 @@
 //! null), and the row stays. A soft-deleted event page in scope hides the row. An entry whose
 //! event page no longer exists is skipped, as `ON DELETE CASCADE` would have removed it.
 //!
-//! Keys: this family writes nothing yet. Every record it will write starts with
-//! `keys::TIMELINE_QUERIES` (`u`); the event index `u 0x01 <event_page_id be8> <date>` -> entry
-//! id arrives with upsertEventProjection.
+//! `excludePrivate` carries the page policy the TypeScript member read from the rendered SQL
+//! (`storePagePolicy`). Under it a row drops when the policy hides its depth page or its event
+//! page (`page_hidden` in facts/privacy.rs); see [`joined_entries`].
+//!
+//! Keys: one record kind, the event index that stands in for the Postgres unique index
+//! `idx_timeline_event_dedup` on `(event_page_id, date)`:
+//!
+//! `u 0x01 <event_page_id be8> <date YYYY-MM-DD>` -> `<page_id be8> <entry id be8>`
+//!
+//! The value names the entry's `E` key. A lookup reads that entry back and treats the index row
+//! as absent when the entry is gone or no longer names the event page (a core write removed it,
+//! for example the hard delete of its depth page). `remove_event_projections` deletes the entries
+//! an event page's index rows name, with their `E` and `D` keys, when the event page is hard
+//! deleted (`ON DELETE CASCADE`).
 //!
 //! The reads scan every timeline entry (`E`). A date index would need a write hook in the core
 //! `addTimelineEntry` path, so it waits until speed needs it.
@@ -24,15 +37,171 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::Store;
 use crate::env::{iso, parse_iso};
-use crate::error::{INVALID_ARGUMENT, Result, StoreError};
+use crate::error::{CONSTRAINT_VIOLATION, INVALID_ARGUMENT, Result, StoreError};
+use crate::facts::{PrivacyPolicy, page_hidden};
 use crate::keys;
 use crate::kv::{KvRead, KvWrite, scan_prefix};
-use crate::pages::{PageRecord, read_page_by_id};
-use crate::timeline::{TimelineRecord, parse_date};
+use crate::links::no_nul;
+use crate::pages::{PageRecord, read_page, read_page_by_id};
+use crate::sources::DEFAULT_SOURCE;
+use crate::takes::{int4, not_null};
+use crate::timeline::{
+    TimelineReceipt, TimelineRecord, TimelineTrust, insert_entry, next_entry_id, parse_date,
+    put_entry, read_entry, recompute_latest, remove_entry,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+mod event_rows;
+mod repair_reads;
+mod site_reads;
+pub use event_rows::{
+    EventProjectionIdSpec, EventProjectionRestoreSpec, EventProjectionRowsSpec,
+    EventProjectionSlugsSpec,
+};
+pub use repair_reads::{
+    ConnectorFenceInput, TimelineHistoryInput, TimelineMarkupInput, TimelinePageScanInput,
+    TimelineRowRewrite,
+};
+pub use site_reads::{
+    DeleteTimelineRowsInput, SegmentedTimelineInput, TimelineOrphanInput, TimelineRowDeletion,
+};
+
 const MICROS_PER_DAY: i64 = 86_400_000_000;
+/// Second byte of an event index key.
+const EVENT_INDEX: u8 = 0x01;
+/// `timeline_entries.source` of an event projection: this prefix and the event slug.
+const EVENT_SOURCE_PREFIX: &str = "life-chronicle:event:";
+
+/// `upsertEventProjection(opts)`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventProjectionInput {
+    pub depth_slug: String,
+    pub event_slug: String,
+    pub date: String,
+    pub summary: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+}
+
+fn event_index_prefix(event_page_id: u64) -> Vec<u8> {
+    let mut key = vec![keys::TIMELINE_QUERIES, EVENT_INDEX];
+    key.extend_from_slice(&event_page_id.to_be_bytes());
+    key
+}
+
+fn event_index_key(event_page_id: u64, date: &str) -> Vec<u8> {
+    let mut key = event_index_prefix(event_page_id);
+    key.extend_from_slice(date.as_bytes());
+    key
+}
+
+fn event_index_value(entry: &TimelineRecord) -> Vec<u8> {
+    let mut value = entry.page_id.to_be_bytes().to_vec();
+    value.extend_from_slice(&entry.id.to_be_bytes());
+    value
+}
+
+/// The projection of `event_page_id` on `date` that an index value names, when that entry still
+/// exists and still names the event page.
+fn indexed_entry(
+    read: &dyn KvRead,
+    value: &[u8],
+    event_page_id: u64,
+    date: &str,
+) -> Result<Option<TimelineRecord>> {
+    if value.len() != 16 {
+        return Ok(None);
+    }
+    let (Some(page_id), Some(id)) = (keys::be8(&value[..8]), keys::be8(&value[8..])) else {
+        return Ok(None);
+    };
+    Ok(read_entry(read, page_id, date, id)?.filter(|e| e.event_page_id == Some(event_page_id)))
+}
+
+/// `ON DELETE CASCADE` of `timeline_entries.event_page_id`: deletes every timeline entry, on any
+/// page, whose `event_page_id` is the page being hard deleted, with its `D` key (when it still
+/// points at the entry) and its index row. `pages::remove_page` calls it in the same write
+/// transaction. `G` is not lowered, as no core delete lowers it.
+pub(crate) fn remove_event_projections(tx: &mut dyn KvWrite, event_page_id: u64) -> Result<()> {
+    let prefix = event_index_prefix(event_page_id);
+    let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    scan_prefix(&*tx, &prefix, false, &mut |k, v| {
+        rows.push((k.to_vec(), v.to_vec()));
+        true
+    })?;
+    for (key, value) in rows {
+        let date = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+        if let Some(entry) = indexed_entry(&*tx, &value, event_page_id, &date)? {
+            tx.delete(&keys::timeline(entry.page_id, &entry.date, entry.id))?;
+            let dedup = entry.dedup_key();
+            if tx.get(&dedup)?.and_then(|b| keys::be8(&b)) == Some(entry.id) {
+                tx.delete(&dedup)?;
+            }
+        }
+        tx.delete(&key)?;
+    }
+    Ok(())
+}
+
+/// One row of `removeTimelineRows`: the stored non-event row as it was read. A null field never
+/// equals anything, so a row with one is never removed.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TimelineRowRemoval {
+    pub id: Value,
+    pub date: Option<String>,
+    pub source: Option<String>,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+    /// Handed back with the row's date; the store does not read it.
+    pub removed: Option<bool>,
+}
+
+/// One row of `updateTimelineDetails`: the entry's detail preimage and the detail to write.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TimelineDetailRefresh {
+    pub id: Value,
+    pub detail: Option<String>,
+    pub next: Option<String>,
+}
+
+/// One row of `insertCanonicalTimelineRows`: a timeline bullet of the page body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CanonicalTimelineRow {
+    pub date: Option<String>,
+    pub source: Option<String>,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// The page's own (no event page) entries by id: the scan the id-keyed writes search.
+fn own_entries(read: &dyn KvRead, page_id: u64) -> Result<HashMap<u64, TimelineRecord>> {
+    let mut raw = Vec::new();
+    scan_prefix(read, &keys::timeline_prefix(page_id), false, &mut |_, v| {
+        raw.push(v.to_vec());
+        true
+    })?;
+    let mut out = HashMap::new();
+    for bytes in raw {
+        let entry: TimelineRecord = serde_json::from_slice(&bytes)?;
+        if entry.event_page_id.is_none() {
+            out.insert(entry.id, entry);
+        }
+    }
+    Ok(out)
+}
+
+/// A recordset `id integer` column: the entry id it names, or none when it is null or names no
+/// possible entry (negative).
+fn entry_id(value: &Value, op: &str) -> Result<Option<u64>> {
+    Ok(int4(value, op, "id")?.and_then(|id| u64::try_from(id).ok()))
+}
 
 /// `ChronicleTimelineOpts` of `getTimelineForDate` and `getSince`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -43,6 +212,8 @@ pub struct ChronicleOptions {
     pub limit: Option<i64>,
     pub source_id: Option<String>,
     pub source_ids: Option<Vec<String>>,
+    /// `excludePrivate`: the page policy (`facts/privacy.rs` `page_hidden`); null reads every row.
+    pub exclude_private: Option<PrivacyPolicy>,
 }
 
 /// The options of `getOnThisDay`.
@@ -53,6 +224,8 @@ pub struct OnThisDayOptions {
     pub limit: Option<i64>,
     pub source_id: Option<String>,
     pub source_ids: Option<Vec<String>>,
+    /// `excludePrivate`, as in [`ChronicleOptions`].
+    pub exclude_private: Option<PrivacyPolicy>,
 }
 
 /// The options of `getLastSeen`.
@@ -62,6 +235,8 @@ pub struct LastSeenOptions {
     pub asof: Option<String>,
     pub source_id: Option<String>,
     pub source_ids: Option<Vec<String>>,
+    /// `excludePrivate`, as in [`ChronicleOptions`].
+    pub exclude_private: Option<PrivacyPolicy>,
 }
 
 /// One entry with its joined pages, as the chronicle reads see it.
@@ -89,7 +264,7 @@ impl Joined {
             "summary": self.entry.summary,
             "detail": self.entry.detail,
             "source": self.entry.source,
-            "trust_tier": "unknown",
+            "trust_tier": self.entry.trust.tier().as_str(),
             "page_id": self.entry.page_id,
             "page_slug": self.page_slug,
             "event_page_id": self.entry.event_page_id,
@@ -175,7 +350,7 @@ fn write_jsonb(value: &Value, out: &mut String) {
         }
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_by(|a, b| (a.len(), a.as_bytes()).cmp(&(b.len(), b.as_bytes())));
+            keys.sort_by(|a, b| crate::jsonb::key_cmp(a, b));
             out.push('{');
             for (i, key) in keys.into_iter().enumerate() {
                 if i > 0 {
@@ -231,9 +406,15 @@ fn who_names(page: &PageRecord, slug: &str) -> bool {
 
 /// Every timeline entry that passes the shared join and filter of the chronicle reads, and the
 /// `keep` predicate on the entry, in no particular order.
+///
+/// With a `policy` (`excludePrivate`), an entry drops when the policy hides its depth page
+/// (`privatePagesFilterForCaller('p')`) or its event page (`privateTimelineEventFilterForCaller`,
+/// an `EXISTS` on the event page by id: it judges the event page whatever its source or deleted
+/// state, so an event page outside the scope still hides the row).
 fn joined_entries(
     read: &dyn KvRead,
     scope: &Option<BTreeSet<String>>,
+    policy: &Option<PrivacyPolicy>,
     keep: &dyn Fn(&TimelineRecord) -> bool,
 ) -> Result<Vec<Joined>> {
     let mut entries = Vec::new();
@@ -269,11 +450,25 @@ fn joined_entries(
         if !in_scope(scope, &depth) {
             continue;
         }
+        if let Some(policy) = policy
+            && page_hidden(read, &depth, policy)?
+        {
+            continue;
+        }
         let event = match entry.event_page_id {
             None => None,
             Some(id) => match page(id)? {
                 // The cascade would have removed the entry with its event page.
                 None => continue,
+                Some(ep)
+                    if policy
+                        .as_ref()
+                        .map(|p| page_hidden(read, &ep, p))
+                        .transpose()?
+                        == Some(true) =>
+                {
+                    continue;
+                }
                 Some(ep) if !in_scope(scope, &ep) => None,
                 Some(ep) if ep.deleted_at_us.is_some() => continue,
                 Some(ep) => Some(ep),
@@ -323,7 +518,7 @@ impl Store {
         };
         let scope = scope(&options.source_id, &options.source_ids);
         let read = self.read()?;
-        let rows = joined_entries(&*read, &scope, &|e| {
+        let rows = joined_entries(&*read, &scope, &options.exclude_private, &|e| {
             e.date.as_str() >= lower.as_str() && e.date.as_str() <= upper.as_str()
         })?;
         Ok(by_instant(rows, limit))
@@ -336,7 +531,9 @@ impl Store {
         let limit = limit_of(options.limit, 200)?;
         let scope = scope(&options.source_id, &options.source_ids);
         let read = self.read()?;
-        let mut rows = joined_entries(&*read, &scope, &|e| e.date.as_str() >= day.as_str())?;
+        let mut rows = joined_entries(&*read, &scope, &options.exclude_private, &|e| {
+            e.date.as_str() >= day.as_str()
+        })?;
         if let Some(kind) = options.kind.as_deref().filter(|k| !k.is_empty()) {
             rows.retain(|row| {
                 row.event
@@ -356,7 +553,7 @@ impl Store {
         let scope = scope(&options.source_id, &options.source_ids);
         let month_day = target[4..].to_string();
         let read = self.read()?;
-        let mut rows = joined_entries(&*read, &scope, &|e| {
+        let mut rows = joined_entries(&*read, &scope, &options.exclude_private, &|e| {
             e.date[4..] == month_day[..] && e.date.as_str() < target.as_str()
         })?;
         // ORDER BY te.date DESC, te.id ASC.
@@ -376,7 +573,9 @@ impl Store {
         let through = target_day(self, &options.asof)?;
         let scope = scope(&options.source_id, &options.source_ids);
         let read = self.read()?;
-        let rows = joined_entries(&*read, &scope, &|e| e.date.as_str() <= through.as_str())?;
+        let rows = joined_entries(&*read, &scope, &options.exclude_private, &|e| {
+            e.date.as_str() <= through.as_str()
+        })?;
         // ORDER BY te.date DESC, COALESCE(ep.effective_date, te.date) DESC, te.id DESC LIMIT 1.
         let newest = rows
             .iter()
@@ -402,13 +601,220 @@ impl Store {
             None => json!({ "last_date": null, "last_event_slug": null }),
         })
     }
-}
 
-/// `ON DELETE CASCADE` of `timeline_entries.event_page_id`: deletes every timeline entry, on any
-/// page, whose `event_page_id` is the page being hard deleted. `pages::remove_page` calls it.
-/// Empty until this family stores event projections.
-pub(crate) fn remove_event_projections(_tx: &mut dyn KvWrite, _event_page_id: u64) -> Result<()> {
-    Ok(())
+    /// `upsertEventProjection({ depthSlug, eventSlug, date, summary, detail?, sourceId? })`:
+    /// `INSERT ... SELECT` from the depth and event pages of one source (default `default`;
+    /// soft-deleted pages count) `ON CONFLICT (event_page_id, date) DO UPDATE` of summary,
+    /// detail, page and source. `{ projected: false }` when either page is missing; a bad date
+    /// fails first. The serial is taken whenever both pages exist, the conflict path included,
+    /// and the update keeps the entry's id and `created_at`. A new or updated entry whose
+    /// `(page, date, summary, source)` matches another entry is `constraint_violation`.
+    pub fn upsert_event_projection(&self, input: &EventProjectionInput) -> Result<Value> {
+        let source_id = input.source_id.as_deref().unwrap_or(DEFAULT_SOURCE);
+        let detail = input.detail.as_deref().unwrap_or("");
+        no_nul(
+            "upsertEventProjection",
+            &[
+                ("depthSlug", &input.depth_slug),
+                ("eventSlug", &input.event_slug),
+                ("summary", &input.summary),
+                ("detail", detail),
+                ("sourceId", source_id),
+            ],
+        )?;
+        let date = parse_date(&input.date)?;
+        let source = format!("{EVENT_SOURCE_PREFIX}{}", input.event_slug);
+        let now = self.env.now_micros();
+        self.write(|tx| {
+            let depth = read_page(&*tx, source_id, &input.depth_slug)?;
+            let event = read_page(&*tx, source_id, &input.event_slug)?;
+            let (Some(depth), Some(event)) = (depth, event) else {
+                return Ok(json!({ "projected": false }));
+            };
+            let id = next_entry_id(tx)?;
+            event_rows::put_event_projection(
+                tx,
+                depth.id,
+                event.id,
+                &date,
+                &source,
+                &input.summary,
+                detail,
+                id,
+                now,
+            )?;
+            Ok(json!({ "projected": true }))
+        })
+    }
+
+    /// `removeTimelineRows(pageId, rows)`: deletes the page's own entries (never an event
+    /// projection) that a row names by id and that still equal it in date, source, summary and
+    /// detail; a null field matches nothing. Returns `[{ date, removed }]` for each deleted row,
+    /// in the order of `rows` (a row named twice is deleted, and returned, once). Every date is
+    /// read as a date before any row is touched, so a bad one fails the whole call. Each delete
+    /// removes the entry's `D` key when it still points at it, and `G` is recomputed after.
+    pub fn remove_timeline_rows(&self, page_id: i64, rows: &[TimelineRowRemoval]) -> Result<Value> {
+        const OP: &str = "removeTimelineRows";
+        let mut asked = Vec::with_capacity(rows.len());
+        for row in rows {
+            let date = row.date.as_deref().map(parse_date).transpose()?;
+            let id = entry_id(&row.id, OP)?;
+            no_nul(
+                OP,
+                &[
+                    ("source", row.source.as_deref().unwrap_or("")),
+                    ("summary", row.summary.as_deref().unwrap_or("")),
+                    ("detail", row.detail.as_deref().unwrap_or("")),
+                ],
+            )?;
+            asked.push((id, date, row));
+        }
+        let Ok(page_id) = u64::try_from(page_id) else {
+            return Ok(json!([]));
+        };
+        if asked.is_empty() {
+            return Ok(json!([]));
+        }
+        self.write(|tx| {
+            let own = own_entries(&*tx, page_id)?;
+            let mut gone = BTreeSet::new();
+            let mut out = Vec::new();
+            for (id, date, row) in asked.clone() {
+                let Some(entry) = id.and_then(|id| own.get(&id)) else {
+                    continue;
+                };
+                let same = date.as_deref() == Some(entry.date.as_str())
+                    && row.source.as_deref() == Some(entry.source.as_str())
+                    && row.summary.as_deref() == Some(entry.summary.as_str())
+                    && row.detail.as_deref() == Some(entry.detail.as_str());
+                if !same || !gone.insert(entry.id) {
+                    continue;
+                }
+                remove_entry(tx, entry)?;
+                out.push(json!({ "date": entry.date, "removed": row.removed }));
+            }
+            if !gone.is_empty() {
+                recompute_latest(tx, page_id)?;
+            }
+            Ok(Value::Array(out))
+        })
+    }
+
+    /// `updateTimelineDetails(pageId, rows)`: sets `detail` to `next` on the page's own entries
+    /// (never an event projection) a row names by id while the stored detail still equals the
+    /// row's `detail` (a null one matches nothing). A row named twice applies once, the first.
+    /// A null `next` on a matching row is `constraint_violation` (the column is `NOT NULL`) and
+    /// the call writes nothing. The entry keeps its id, date, source, summary and `created_at`.
+    pub fn update_timeline_details(
+        &self,
+        page_id: i64,
+        rows: &[TimelineDetailRefresh],
+    ) -> Result<()> {
+        const OP: &str = "updateTimelineDetails";
+        let mut asked = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = entry_id(&row.id, OP)?;
+            no_nul(
+                OP,
+                &[
+                    ("detail", row.detail.as_deref().unwrap_or("")),
+                    ("next", row.next.as_deref().unwrap_or("")),
+                ],
+            )?;
+            asked.push((id, row));
+        }
+        let Ok(page_id) = u64::try_from(page_id) else {
+            return Ok(());
+        };
+        if asked.is_empty() {
+            return Ok(());
+        }
+        self.write(|tx| {
+            let own = own_entries(&*tx, page_id)?;
+            let mut done = BTreeSet::new();
+            for (id, row) in asked.clone() {
+                let Some(entry) = id.and_then(|id| own.get(&id)) else {
+                    continue;
+                };
+                if row.detail.as_deref() != Some(entry.detail.as_str()) || !done.insert(entry.id) {
+                    continue;
+                }
+                let Some(next) = &row.next else {
+                    return Err(not_null("timeline_entries", "detail"));
+                };
+                let new = TimelineRecord {
+                    detail: next.clone(),
+                    ..entry.clone()
+                };
+                put_entry(tx, Some(entry), &new)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// `insertCanonicalTimelineRows(pageId, rows)`: inserts the rows as the page's own entries,
+    /// in order, as `INSERT .. ON CONFLICT (page_id, date, md5(summary), source) DO NOTHING`
+    /// does: a row equal to a stored entry of the page (or to an earlier row of the call) on date,
+    /// summary and source is skipped, and still takes an id. The page may be soft-deleted; a
+    /// missing page is `constraint_violation` (the foreign key). A null column is
+    /// `constraint_violation` (`NOT NULL`), a bad date `invalid_argument`; either writes nothing.
+    pub fn insert_canonical_timeline_rows(
+        &self,
+        page_id: i64,
+        rows: &[CanonicalTimelineRow],
+    ) -> Result<()> {
+        const OP: &str = "insertCanonicalTimelineRows";
+        let mut asked = Vec::with_capacity(rows.len());
+        for row in rows {
+            let column = |name: &str, value: &Option<String>| -> Result<String> {
+                let text = value
+                    .clone()
+                    .ok_or_else(|| not_null("timeline_entries", name))?;
+                no_nul(OP, &[(name, text.as_str())])?;
+                Ok(text)
+            };
+            let date = parse_date(&column("date", &row.date)?)?;
+            let (source, summary, detail) = (
+                column("source", &row.source)?,
+                column("summary", &row.summary)?,
+                column("detail", &row.detail)?,
+            );
+            asked.push((date, source, summary, detail));
+        }
+        if asked.is_empty() {
+            return Ok(());
+        }
+        self.write(|tx| {
+            let page = u64::try_from(page_id)
+                .ok()
+                .map(|id| read_page_by_id(&*tx, id))
+                .transpose()?
+                .flatten()
+                .ok_or_else(|| {
+                    StoreError::new(
+                        CONSTRAINT_VIOLATION,
+                        "insert or update on table \"timeline_entries\" violates foreign key constraint \"timeline_entries_page_id_fkey\"",
+                    )
+                })?;
+            let now = self.env.now_micros();
+            for (date, source, summary, detail) in asked.clone() {
+                let record = TimelineRecord {
+                    id: 0,
+                    page_id: page.id,
+                    date,
+                    source,
+                    summary,
+                    detail,
+                    event_page_id: None,
+                    created_at_us: now,
+                    receipt: TimelineReceipt::default(),
+                    trust: TimelineTrust::default(),
+                };
+                insert_entry(tx, record)?;
+            }
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]

@@ -60,7 +60,7 @@ const AUTHED = {
   scopes: ['admin'],
 } as OperationContext['auth'];
 
-/** Direct SQL seed (same shape as test/jobs-ops-token-redaction.test.ts), owned by AUTHED's client unless `owner` says otherwise. */
+/** Direct SQL seed (same shape as test/jobs-ops-token-redaction.test.ts), owned by AUTHED's client unless `owner` says otherwise (GST-4010). */
 async function seedJob(status = 'waiting', owner: string = AUTHED!.clientId): Promise<number> {
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO minion_jobs (submission_authority, name, queue, status, data)
@@ -118,7 +118,7 @@ describe('send_job_message — remote sidechannel fence (fail-closed)', () => {
     expect(rows[0].payload).toEqual({ directive: 'focus on X' });
   });
 
-  it('remote + authenticated: a job another client submitted reads as not found, nothing persisted', async () => {
+  it('GST-4010: remote + authenticated: a job another client submitted reads as not found, nothing persisted', async () => {
     const id = await seedJob('waiting', 'another-client');
     await expect(send_job_message.handler(ctxOf({ auth: AUTHED }), { id, payload: { x: 1 } })).rejects.toThrow(/not found/i);
     expect(await inboxRows(id)).toHaveLength(0);

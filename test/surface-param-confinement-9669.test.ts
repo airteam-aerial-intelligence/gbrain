@@ -189,6 +189,22 @@ for (const kind of testBackends()) {
       expect(filterOpsForSurface(operations.filter(op => op.name === 'remember'), 'starter')[0]!.params).not.toHaveProperty('valid_from');
     });
 
+    test('GST-3170: a starter client cannot pass a typed-claim key its schema hides inside remember items either', async () => {
+      const hidden = Object.keys(operations.find(op => op.name === 'remember')!.params).filter(key => key.startsWith('claim_')
+        && !(key in filterOpsForSurface(operations.filter(op => op.name === 'remember'), 'starter')[0]!.params) && !(CALLABLE.remember?.[key]));
+      expect(hidden.length).toBeGreaterThan(0);
+      const fact = 'acme-example closed a round canaryitemclaim';
+      for (const key of hidden) {
+        const res = await dispatchToolCall(engine, 'remember',
+          { items: [{ fact, entity: 'acme-example', provenance: 'meeting notes', [key]: key === 'claim_value' ? 5 : 'fundraise' }] }, stdio('starter'));
+        expect({ key, code: envelope(res).code, text: all(res).includes(key) }).toEqual({ key, code: CODE, text: true });
+      }
+      expect((await engine.executeRaw('SELECT 1 FROM facts WHERE fact = $1', [fact])).length).toBe(0);
+      const full = await dispatchToolCall(engine, 'remember',
+        { items: [{ fact, entity: 'acme-example', provenance: 'meeting notes', claim_metric: 'fundraise', claim_value: 5 }] }, stdio('full'));
+      expect(full.isError).toBeFalsy();
+    });
+
     test('param_not_on_surface is one registered code, and a call to a hidden tool still gets unknown_tool', async () => {
       expect(CODE in CODES).toBe(true);
       expect(operations.some(op => op.name === 'get_versions') && !allowedOpNames(operations, 'starter').has('get_versions')).toBe(true);
@@ -249,7 +265,8 @@ describe('census: every parameter a narrower surface leaves out of an operation 
         if (name in listed.params) continue;
         const companion = def.appliesWith ? { [def.appliesWith]: example(op.params[def.appliesWith]!) } : {};
         reached.clear();
-        const env = envelope(await dispatchToolCall(engine, op.name, { ...companion, [name]: example(def) }, stdio(surface)));
+        const value = surfaces.STARTER_PARAM_VALUES[op.name]?.[name]?.[0] ?? example(def);
+        const env = envelope(await dispatchToolCall(engine, op.name, { ...companion, [name]: value }, stdio(surface)));
         const id = `${op.name}.${name}`;
         if (CALLABLE[op.name]?.[name] !== undefined) {
           if (env.code === CODE && String(env.message).includes(' ' + name)) leaked.push(id + ' (listed callable, refused)');
@@ -377,3 +394,15 @@ for (const kind of testBackends()) {
     });
   });
 }
+
+describe('a starter caller\'s off-surface content_origin', () => {
+  const remember = operations.find(o => o.name === 'remember')!;
+  test('only a value the full surface accepts is refused as off the surface, and the refusal never echoes anything else', () => {
+    expect(surfaces.paramValueOffSurface(remember, { content_origin: 'user_said' }, 'starter')).toMatchObject({ param: 'content_origin', value: 'user_said' });
+    expect(surfaces.paramValueOffSurface(remember, { items: [{ fact: 'x', content_origin: 'user_said' }] }, 'starter')).toMatchObject({ inItem: true });
+    for (const value of ['sk-live-not-a-real-key', 'user', 123, null]) {
+      expect(surfaces.paramValueOffSurface(remember, { content_origin: value }, 'starter')).toBeUndefined();
+      expect(surfaces.paramValueOffSurface(remember, { items: [{ fact: 'x', content_origin: value }] }, 'starter')).toBeUndefined();
+    }
+  });
+});

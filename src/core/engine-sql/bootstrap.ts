@@ -176,6 +176,9 @@ const FORWARD_REFERENCE_PROBES: readonly Probe[] = [
   ['chat_usage_log_exists', 'chat_usage_log'],
   ['chat_usage_log_job_id_exists', 'chat_usage_log', 'job_id'],
   ['chat_usage_log_error_class_exists', 'chat_usage_log', 'error_class'],
+  ['write_gate_holds_exists', 'write_gate_holds'],
+  ['write_gate_holds_page_id_exists', 'write_gate_holds', 'page_id'],
+  ['write_gate_holds_page_candidates_exists', 'write_gate_holds', 'page_candidates'],
 ];
 
 // Probed only where `dreamVerdictsForwardReference` (the Postgres blob).
@@ -334,6 +337,10 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
   // the last column added, so its absence means some attribution column is missing.
   const needsChatUsageAttribution = probe.chat_usage_log_exists
     && (!probe.chat_usage_log_job_id_exists || !probe.chat_usage_log_error_class_exists);
+  // v333: the blob's write_gate_holds_bound_dedupe_idx / _unbound_dedupe_idx / _page_idx name page_id and
+  // page_candidates, columns only v333 adds, so a brain at v227-v333 would wedge on the replay.
+  const needsWriteGateHoldsPageId = probe.write_gate_holds_exists
+    && (!probe.write_gate_holds_page_id_exists || !probe.write_gate_holds_page_candidates_exists);
   return {
     needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap, needsPagesDeletedAt,
     needsMcpLogBootstrap, needsSubagentProviderId, needsChunksEmbeddingImage, needsPagesRecency,
@@ -343,7 +350,7 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
     needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
-    needsLinkTransitionsLinkSource, needsChatUsageAttribution,
+    needsLinkTransitionsLinkSource, needsChatUsageAttribution, needsWriteGateHoldsPageId,
   };
 }
 
@@ -362,7 +369,7 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
     needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
-    needsLinkTransitionsLinkSource, needsChatUsageAttribution,
+    needsLinkTransitionsLinkSource, needsChatUsageAttribution, needsWriteGateHoldsPageId,
   } = gaps;
 
   if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -381,7 +388,8 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
       && !needsMinionJobsPrivateQueue && !needsMinionJobsAuthority
       && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity
       && !needsDerivedGenerationItemsPending
-      && !needsLinkTransitionsLinkSource && !needsChatUsageAttribution) return;
+      && !needsLinkTransitionsLinkSource && !needsChatUsageAttribution
+      && !needsWriteGateHoldsPageId) return;
 
   process.stderr.write('  Schema forward-reference gap detected, applying bootstrap\n');
 
@@ -614,7 +622,7 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     needsPagesGeneration, needsPagesEmbeddingSignature, needsPagesLinksExtractedAt,
     needsTimelineEventPageId, needsMinionJobsTimeoutAt, needsMinionJobsIdempotencyKey,
     needsDreamVerdictsExpiresAt, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource, needsChatUsageAttribution,
+    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource, needsChatUsageAttribution, needsWriteGateHoldsPageId,
   } = gaps;
 
   if (needsPagesLastRetrievedAt) {
@@ -780,6 +788,14 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS outcome TEXT;
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS transport TEXT;
       ALTER TABLE chat_usage_log ADD COLUMN IF NOT EXISTS error_class TEXT;
+    `);
+  }
+  if (needsWriteGateHoldsPageId) {
+    // Columns only, exactly as v333 adds them (nullable, no default: metadata only); v333 still runs and backfills the
+    // page binding, then swaps the dedupe index for the two disjoint partial ones.
+    await exec(`
+      ALTER TABLE write_gate_holds ADD COLUMN IF NOT EXISTS page_id BIGINT;
+      ALTER TABLE write_gate_holds ADD COLUMN IF NOT EXISTS page_candidates BIGINT[];
     `);
   }
 }

@@ -141,10 +141,12 @@ Timing knobs the drain uses:
 
 A long-running process (the serve, `gbrain sync --watch`) keeps the tree
 listing of the commit its last pass read and lists only what changed since
-(`git diff-tree`), still judging every path. It also keeps its last synced
-pass's pages-and-import-records read (`I⋈P`) and re-reads in its own
-snapshot only rows changed since. Any doubt reads whole: a new
-process, another source, a failed or unsynced pass, a read older than 10
+(`git diff-tree`), still judging every path. It also keeps its last
+pass's pages-and-import-records read (`I⋈P`), when that pass synced or stopped
+resumable, and re-reads in its own snapshot only rows changed since; a round
+whose `HEAD` moved since the pass's previous round patches that round's read
+the same way. Any doubt reads whole: a new
+process, another source, a failed pass, a read older than 10
 minutes, a change over a quarter of the tree or source (and over 2,000), counts
 that do not add up, a wide transaction-id span, pathspec characters in scope,
 or any error. Holds, markers, open work and the Git level are read every round.
@@ -672,8 +674,9 @@ vars — incident-time escape hatches, not everyday knobs.
    the rest of the sync's link budget (1,000 pages and 5 minutes, less what the
    imports used) on the source's stale-link backlog. So an uncontended run drains
    as much backlog as a plain `gbrain sync` does, but other refreshes of the
-   checkout no longer wait on it. Refreshes drain a source's backlog one at a time:
-   a refresh that finds another refresh's drain running skips its own (a plain
+   checkout no longer wait on it. Refreshes drain a source's backlog one at a time
+   per brain: a refresh that finds another refresh's drain of the same brain's
+   source running skips its own (a plain
    `gbrain sync` derives its own share without that lock). `--json` lists each
    member's drain in `link_backlog`: `outcome` is `drained` (with `pages`
    derived and `remaining`), `skipped` or `failed` (with `message`). A failed

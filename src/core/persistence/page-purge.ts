@@ -66,6 +66,7 @@ import { appendPurgeIntent } from '../belief/purge-mirror.ts';
 import { scrubPurgedSlugs } from '../feedback/store.ts';
 import { scrubPurgedNameStores } from './purge-name-stores.ts';
 import { scrubPurgedSlugStores } from './purge-slug-stores.ts';
+import { dropPurgedCandidates, holdOwnedByDeletedPageSql, noteKeptHoldsCte } from '../write-gate-binding.ts';
 import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, derivedStreamSlugs, pageLifetimesOf, pagePurgeClaims, redactCarryingFields, redactPurgedKeys, registerLiveCarriers,
   sourceHasBeliefEvents, type LedgerPurgeReport } from '../belief/purge.ts';
 
@@ -283,8 +284,50 @@ async function tombstonePage(tx: BrainEngine, sourceId: string, slug: string, pa
 }
 
 /** Inside the coordinated delete transaction, before the page row is deleted. */
-/** The page's add_timeline_entry receipts one purge redacts; a page with more leaves `journal_sweep.complete` false. */
+/** The page's add_timeline_entry and edit_page receipts one purge redacts; a page with more leaves `journal_sweep.complete` false. */
 const TIMELINE_RECEIPT_CAP = 10_000;
+
+type TimelineReceipt = IntentRedactionTarget & { sequence: string; summary: string | null; source: string | null; bullet: string | null; diff: string | null };
+
+/**
+ * The add_timeline_entry receipts of `slugs`, compacted ones included, in sequence order after `after`; their outcome keeps the
+ * entry text. `withDiffs` adds the edit_page receipts, whose outcome keeps the edit's unified diff of the page text.
+ */
+async function timelineReceipts(tx: BrainEngine, sourceId: string, slugs: readonly string[], limit: number, after = '0', withDiffs = false): Promise<TimelineReceipt[]> {
+  return tx.executeRaw<TimelineReceipt>(`SELECT id::text AS id, principal_kind, principal_id, sequence::text AS sequence, outcome->'entry'->>'summary' AS summary,
+    outcome->'entry'->>'source' AS source, outcome->>'bullet' AS bullet, outcome->>'diff' AS diff FROM persistence_requests
+    WHERE source_id=$1 AND slug=ANY($2::text[]) AND ((operation='add_timeline_entry' AND outcome ? 'entry') OR ($5::boolean AND operation='edit_page' AND outcome ? 'diff'))
+    AND sequence > $4::bigint ORDER BY sequence LIMIT $3`, [sourceId, [...slugs], limit, after, withDiffs]);
+}
+
+const receiptText = (rows: readonly TimelineReceipt[]) => rows.flatMap(t => [t.summary, t.source, t.bullet, t.diff]).map(text => text?.trim() ?? '').filter(Boolean);
+
+/** Rows one lookup of the unmanaged expiry's journal redaction reads at a time. */
+const EXPIRY_JOURNAL_BATCH = 1_000;
+
+/**
+ * F4: on a brain without a write owner, the journal redaction of pages a purge hard-deletes, in its transaction (which
+ * declared the persistence protocol first). The pages' add_timeline_entry and edit_page receipts lose their entry text and
+ * edit diffs, compacted ones included, and their own requests lose their intents and any of that text, batch by batch until every row is read. A
+ * request still pending keeps its intent and fails on the missing page; other pages' requests that quote these are not swept.
+ */
+export async function redactExpiredPageJournal(tx: BrainEngine, sourceId: string, slugs: readonly string[]): Promise<void> {
+  if (!slugs.length) return;
+  const exact = new Set<string>();
+  for (let after = '0'; ;) {
+    const batch = await timelineReceipts(tx, sourceId, slugs, EXPIRY_JOURNAL_BATCH, after, true);
+    for (const text of receiptText(batch)) exact.add(text);
+    await redactRequestIntents(tx, batch, undefined, { skipPending: true, exact });
+    if (batch.length < EXPIRY_JOURNAL_BATCH) break;
+    after = batch[batch.length - 1]!.sequence;
+  }
+  for (let after = '0'; ;) {
+    const batch = await findRequestsForSlugs(tx, sourceId, slugs, EXPIRY_JOURNAL_BATCH, after);
+    await redactRequestIntents(tx, batch, undefined, { skipPending: true, exact });
+    if (batch.length < EXPIRY_JOURNAL_BATCH) break;
+    after = batch[batch.length - 1]!.sequence;
+  }
+}
 
 /** The journal census a page purge redacts: the requests carrying its claims, and whether the search covered every one. */
 export interface PurgeCensus { targets: IntentRedactionTarget[]; complete: boolean }
@@ -301,14 +344,14 @@ export interface PurgedPageSweep {
   census: () => Promise<PurgeCensus>;
   /** The live purge's typed timeout wrapper around journal lookups; the restore replay passes none. */
   lookup?: <T>(point: PurgeLookupPoint, fn: () => Promise<T>) => Promise<T>;
-  /** The most add_timeline_entry receipts redacted; more leaves the sweep incomplete. */
+  /** The most add_timeline_entry and edit_page receipts redacted; more leaves the sweep incomplete. */
   timelineCap?: number;
   /** A restored archive older than some stores: the stores it has. Absent means every store exists (the live database). */
   present?: ReadonlySet<string>;
 }
 
 /** The stores the shared sweep touches that an older restored archive may not have yet. */
-export const PURGE_SWEEP_STORES = ['decide_review_queue', 'decide_review_proposals', 'decide_proposals', 'trust_proposals', 'write_gate_holds', 'write_gate_receipts',
+export const PURGE_SWEEP_STORES = ['decide_review_queue', 'decide_review_proposals', 'decide_proposals', 'trust_proposals', 'write_gate_holds', 'write_gate_hold_rechecks', 'write_gate_receipts',
   'persistence_requests', 'persistence_effects', 'files', 'derived_generations', 'derived_generation_items', 'retrieval_event_pages', 'mention_gazetteer_entries', 'op_checkpoints'] as const;
 type SweptStore = typeof PURGE_SWEEP_STORES[number];
 
@@ -336,7 +379,11 @@ export async function sweepPurgedPage(tx: BrainEngine, input: PurgedPageSweep): 
       OR (target_table='facts' AND target_id=ANY($3::bigint[])) OR (related_table='facts' AND related_id=ANY($3::bigint[]))
       OR (target_table='takes' AND target_id=ANY($4::bigint[])) OR (related_table='takes' AND related_id=ANY($4::bigint[]))) RETURNING 1`, [sourceId, pageId, factIds, takeIds]);
   }
-  const holds = has('write_gate_holds') ? (await tx.executeRaw<{ id: string }>('DELETE FROM write_gate_holds WHERE source_id=$1 AND slug=$2 RETURNING id::text AS id', [sourceId, slug])).map(h => h.id) : [];
+  // The holds kept for another page are noted in the same statement (write-gate-binding.ts noteKeptHoldsCte).
+  const noted = has('write_gate_hold_rechecks') ? `WITH ${noteKeptHoldsCte('$1', '$3', '$2', q => `${q}.id = $3::bigint`)} ` : '';
+  const holds = has('write_gate_holds') ? (await tx.executeRaw<{ id: string }>(
+    `${noted}DELETE FROM write_gate_holds h WHERE h.source_id=$1 AND ${holdOwnedByDeletedPageSql('h', '$3', '$2')} RETURNING h.id::text AS id`, [sourceId, slug, pageId])).map(h => h.id) : [];
+  if (has('write_gate_holds')) holds.push(...await dropPurgedCandidates(tx, sourceId, [{ id: pageId }]));
   if (has('write_gate_holds')) removed.write_gate_holds = holds.length;
   if (has('write_gate_receipts')) {
     removed.write_gate_receipts = await count(`DELETE FROM write_gate_receipts WHERE (target_table='pages' AND target_id=$1) OR (target_table='facts' AND target_id=ANY($2::text[]))
@@ -352,14 +399,12 @@ export async function sweepPurgedPage(tx: BrainEngine, input: PurgedPageSweep): 
   let complete = true;
   if (has('persistence_requests')) {
     const census = await input.census();
-    // The page's add_timeline_entry receipts keep the entry text in their outcome (`entry` summary and source, `bullet`), compacted
-    // ones included. That text is matched whole in the page's own requests (a set lookup, linear in their strings). A page past
+    // The page's add_timeline_entry receipts keep the entry text in their outcome (`entry` summary and source, `bullet`) and its
+    // edit_page receipts the edit's diff, compacted ones included. That text is matched whole in the page's own requests (a set lookup, linear in their strings). A page past
     // the cap leaves the journal sweep incomplete instead of claiming every receipt.
-    const timelineRows = await lookup('slug_lookup', () => tx.executeRaw<IntentRedactionTarget & { summary: string | null; source: string | null; bullet: string | null }>(`SELECT id::text AS id,
-      principal_kind, principal_id, outcome->'entry'->>'summary' AS summary, outcome->'entry'->>'source' AS source, outcome->>'bullet' AS bullet FROM persistence_requests
-      WHERE source_id=$1 AND slug=$2 AND operation='add_timeline_entry' AND outcome ? 'entry' ORDER BY sequence LIMIT $3`, [sourceId, slug, timelineCap + 1]));
+    const timelineRows = await lookup('slug_lookup', () => timelineReceipts(tx, sourceId, [slug], timelineCap + 1, '0', true));
     const timeline = timelineRows.slice(0, timelineCap);
-    const timelineText = new Set(timeline.flatMap(t => [t.summary, t.source, t.bullet]).map(text => text?.trim() ?? '').filter(Boolean));
+    const timelineText = new Set(receiptText(timeline));
     const forSlug = await lookup('slug_lookup', async () => [...await findRequestsForSlugs(tx, sourceId, [slug]), ...reasons.length ? await requestsRecordingReasons(tx, sourceId, slug) : [], ...timeline]);
     const own = new Set(forSlug.map(r => r.id));
     const requests = [...new Map([...forSlug, ...census.targets].map(r => [r.id, r])).values()];

@@ -250,6 +250,10 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // chat_usage_log attribution (no numbered migration): the blob's partial
   // idx_chat_usage_log_job references job_id, which only the bootstrap adds.
   { kind: 'column', table: 'chat_usage_log', column: 'job_id' },
+  // v333: the blob's write_gate_holds_bound_dedupe_idx / _unbound_dedupe_idx / _page_idx name the hold's page binding
+  // columns, which only v333 adds to a brain at v227-v333.
+  { kind: 'column', table: 'write_gate_holds', column: 'page_id' },
+  { kind: 'column', table: 'write_gate_holds', column: 'page_candidates' },
 ];
 
 test('applyForwardReferenceBootstrap covers every forward reference declared in REQUIRED_BOOTSTRAP_COVERAGE', async () => {
@@ -388,6 +392,10 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       -- attribution strip: an older chat_usage_log has no job_id or its index.
       DROP INDEX IF EXISTS idx_chat_usage_log_job;
       ALTER TABLE chat_usage_log DROP COLUMN IF EXISTS job_id;
+      -- v333 strip: a v227-v333 write_gate_holds has neither binding column; the blob's
+      -- partial dedupe indexes name them, so bootstrap must re-add both before the replay.
+      ALTER TABLE write_gate_holds DROP COLUMN IF EXISTS page_id;
+      ALTER TABLE write_gate_holds DROP COLUMN IF EXISTS page_candidates;
     `);
 
     // Note: we don't strip sources.archived* here because they're inline in the
@@ -511,6 +519,10 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
       -- attribution strip: an older chat_usage_log has no job_id or its index.
       DROP INDEX IF EXISTS idx_chat_usage_log_job;
       ALTER TABLE chat_usage_log DROP COLUMN IF EXISTS job_id;
+      -- v333 strip: a v227-v333 write_gate_holds has neither binding column; the blob's
+      -- partial dedupe indexes name them, so bootstrap must re-add both before the replay.
+      ALTER TABLE write_gate_holds DROP COLUMN IF EXISTS page_id;
+      ALTER TABLE write_gate_holds DROP COLUMN IF EXISTS page_candidates;
 
       -- WP4 (v127) strip: surface columns + the wedge-signal index; replay
       -- must succeed from the pre-v127 shape.
@@ -1253,6 +1265,9 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   'oauth_clients.attest_actor',
   'oauth_clients.attest_ops',
   'oauth_tokens.grant_type',
+  // #9364 (v338): migration-only like grant_type; the partial family index is created by the same migration, and
+  // oauth-grants.ts reads the column only once the v338 table exists.
+  'oauth_tokens.family_id',
   // GST-1113 (migration v293) - attest_sources, the scope sources an attested memory_write may name. Same posture as
   // v286: absent from both schema blobs; readers go through to_jsonb(row), so a schema without it reads as none.
   'access_tokens.attest_sources',
@@ -1324,6 +1339,9 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   'persistence_consumers.capabilities',
   // GST-1582 (v291): migration-only like the PR B columns above, for the same reason.
   'persistence_requests.deferred_import_from',
+  // GST-3127 (v330): entity_identity_reviews is a migration-only table (v325; no CREATE TABLE in the schema blob)
+  // and no blob index, view or trigger reads evidence, so there is no forward reference; the chain adds it.
+  'entity_identity_reviews.evidence',
 ]);
 
 test('every ALTER TABLE ADD COLUMN in MIGRATIONS is covered by applyForwardReferenceBootstrap (column-only class)', async () => {

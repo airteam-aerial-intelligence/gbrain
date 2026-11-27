@@ -198,8 +198,10 @@ The agent runs `gbrain get <slug> --grep pricing --context 1` (MCP:
 matter), down to the next heading of the same or a higher level, with the
 headings above it. If no heading matches, the error lists the page's headings
 (up to 20). `--grep` returns each paragraph with a line containing the text
-(plain text, not a pattern) plus `--context` paragraphs either side (default
-1, at most 5), with line numbers and `total_matches`. It returns at most 50
+(plain text, not a pattern; `--grep 'uptime|SLA'` also matches either word,
+while a spaced pipe such as `'| seats |'` stays literal) plus `--context`
+paragraphs either side (default 1, at most 5), with line numbers and
+`total_matches`. It returns at most 50
 matching paragraphs and 100,000 characters, and says `truncated` when it
 stops early. The line numbers are the ones a `--body window` read takes:
 `gbrain get <slug> --body window --lines 100-140` reads lines 100 to 140
@@ -621,6 +623,8 @@ An edited file imports normally. Its response carries the same store-by-store
 the purged page's facts. A write refused because it carries purged content,
 or accepted as a no-op after its purged rows were dropped, keeps no copy of
 that content in its stored write request.
+
+The automatic purge of expired deleted pages does the same for the write journal on a brain without a write owner, in the transaction that deletes the page: the page's timeline entry text, edit diffs and stored write intents are removed from its journal entries, including entries written while the brain had a write owner. A write still pending keeps its intent and then fails on the missing page. Other pages' journal entries that quote the purged text are not swept. An explicit `gbrain delete --purge` now also removes the diff kept in the page's compacted edit receipts.
 
 An owner purge held to keep a derived page private (`derived_origin_parked`)
 stays owed until its page is removed or restored: whichever purge later removes
