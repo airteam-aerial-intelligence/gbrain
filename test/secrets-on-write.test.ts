@@ -217,3 +217,17 @@ describe('secrets.on_write redact', () => {
     });
   });
 });
+
+describe('secrets.on_write from GBRAIN_SECRETS_ON_WRITE (container deployments with no config file)', () => {
+  test('refuse in the environment blocks a remote write when no config file is set', async () => {
+    await withMode(undefined, () => withEnv({ GBRAIN_SECRETS_ON_WRITE: 'refuse' }, async () => {
+      expectSecretRefusal(await refusal(() => call(remote(), 'put_page', { slug: 'notes/env-refuse', content: '# Env\n\nkey ' + TOKEN + '\n' })));
+      expect(await page('notes/env-refuse')).toBeNull();
+    }));
+  });
+  test('the environment only tightens: block in the file stays block under env redact', async () => {
+    await withMode('block', () => withEnv({ GBRAIN_SECRETS_ON_WRITE: 'redact' }, async () => {
+      expectSecretRefusal(await refusal(() => call(remote(), 'put_page', { slug: 'notes/env-tighten', content: '# Env\n\nkey ' + TOKEN + '\n' })));
+    }));
+  });
+});

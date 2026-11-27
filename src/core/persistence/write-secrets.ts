@@ -15,10 +15,22 @@ export const ON_WRITE_MODES = ['off', 'redact', 'block'] as const;
 export type OnWrite = typeof ON_WRITE_MODES[number];
 export interface SecretsRedacted { count: number; patterns: string[] }
 
+/** Environment twin of `secrets.on_write` (a container sets it without a config file); it can only tighten. `refuse` reads as `block`. */
+export const ON_WRITE_ENV = 'GBRAIN_SECRETS_ON_WRITE';
+const STRICTNESS: Record<OnWrite, number> = { off: 0, redact: 1, block: 2 };
+
+function envOnWriteMode(): OnWrite | null {
+  const raw = (process.env[ON_WRITE_ENV] ?? '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'refuse') return 'block';
+  return ON_WRITE_MODES.includes(raw as OnWrite) ? raw as OnWrite : 'block';
+}
+
 export function onWriteMode(): OnWrite {
   const mode = loadConfigFileOnly()?.secrets?.on_write;
-  if (mode == null) return 'off';
-  return ON_WRITE_MODES.includes(mode as OnWrite) ? mode as OnWrite : 'block';
+  const file: OnWrite = mode == null ? 'off' : ON_WRITE_MODES.includes(mode as OnWrite) ? mode as OnWrite : 'block';
+  const env = envOnWriteMode();
+  return env && STRICTNESS[env] > STRICTNESS[file] ? env : file;
 }
 
 /** Stand-ins documentation uses (the AWS documentation's example key id, a database URL's user:password), allowed by fingerprint. */
