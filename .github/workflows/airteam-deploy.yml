@@ -47,7 +47,7 @@ jobs:
             echo "VERSION file is empty" >&2
             exit 1
           fi
-          TAG="v${VERSION}-airteam.${RUN_NUMBER}"
+          TAG="v${VERSION}-airteam-ci.${RUN_NUMBER}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Image tag: $TAG"
 
