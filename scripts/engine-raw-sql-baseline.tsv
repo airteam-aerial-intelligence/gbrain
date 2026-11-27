@@ -1286,4 +1286,4 @@ src/core/initiatives/route-facts.ts	execute_raw	1	slack facts past the route wat
 src/core/initiatives/store.ts	execute_raw	2	list idea/initiative pages by prefix. TODO(initiatives): typed engine method
 src/core/minions/handlers/initiative-finish.ts	execute_raw	1	sync job wait poll. TODO(initiatives): typed engine method
 src/core/minions/remote-caller-authority.ts	execute_raw	1	fork end-user owner lookup merged onto upstream fence. TODO(remote-jobs): typed engine method
-src/core/ops/initiatives.ts	execute_raw	6	initiative status/bind lookups (facts, sources, jobs). TODO(initiatives): typed engine method
+src/core/ops/initiatives.ts	execute_raw	7	initiative status/bind lookups (facts, sources, jobs, finish job state). TODO(initiatives): typed engine method
